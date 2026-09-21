@@ -1,0 +1,324 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  MikuAuth - Velocity 登录验证插件
+  构建产物: target/MikuAuth-<version>.jar (shade 后可直接放入 Velocity 的 plugins 目录)
+-->
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <groupId>cn.miku</groupId>
+    <artifactId>mikuauth</artifactId>
+    <version>2.4.3</version>
+    <packaging>jar</packaging>
+
+    <name>MikuAuth</name>
+
+    <developers>
+        <developer>
+            <name>JunXieX</name>
+        </developer>
+    </developers>
+
+    <description>Velocity 登录验证插件：正版多源免密 / 基岩版免密 / Dialog 菜单 / 同 IP 会话免密 / SQLite + MariaDB</description>
+
+    <properties>
+        <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+        <!-- Velocity 4.x 要求 Java 25（Velocity 4.0.0 起的最低 JVM 版本），
+             因此编译目标同步到 25，不再向下兼容 Java 17 -->
+        <maven.compiler.release>25</maven.compiler.release>
+        <!-- Velocity API 版本：编译期依赖，须与运行时代理（Velocity / VelocityCTD）的
+             大版本一致。4.2.0 是 4.x 线当前的正式发布版 -->
+        <velocity.version>4.2.0</velocity.version>
+    </properties>
+
+    <repositories>
+        <!-- Velocity API 仓库 -->
+        <repository>
+            <id>papermc</id>
+            <url>https://repo.papermc.io/repository/maven-public/</url>
+        </repository>
+        <!-- PacketEvents 仓库 -->
+        <repository>
+            <id>codemc</id>
+            <url>https://repo.codemc.io/repository/maven-releases/</url>
+        </repository>
+    </repositories>
+
+    <dependencies>
+        <!-- Velocity API：编译期依赖，运行时由代理提供，绝不打包。
+             4.x 线要求 Java 25 运行时 -->
+        <dependency>
+            <groupId>com.velocitypowered</groupId>
+            <artifactId>velocity-api</artifactId>
+            <version>${velocity.version}</version>
+            <scope>provided</scope>
+        </dependency>
+        <!-- Adventure 文本组件（Velocity 运行时自带） -->
+        <dependency>
+            <groupId>net.kyori</groupId>
+            <artifactId>adventure-api</artifactId>
+            <version>4.26.1</version>
+            <scope>provided</scope>
+        </dependency>
+        <dependency>
+            <groupId>net.kyori</groupId>
+            <artifactId>adventure-text-minimessage</artifactId>
+            <version>4.26.1</version>
+            <scope>provided</scope>
+        </dependency>
+        <!-- Gson：Velocity 运行时自带，用于解析正版验证 API 的 JSON 响应 -->
+        <dependency>
+            <groupId>com.google.code.gson</groupId>
+            <artifactId>gson</artifactId>
+            <version>2.10.1</version>
+            <scope>provided</scope>
+        </dependency>
+
+        <!-- PacketEvents：Dialog 菜单（原版 1.21.6+ 对话框）协议实现。
+             运行时依赖 packetevents-velocity 插件（必须使用官方完整版 jar），
+             只写 provided 不打进插件 jar -->
+        <dependency>
+            <groupId>com.github.retrooper</groupId>
+            <artifactId>packetevents-api</artifactId>
+            <version>2.13.0</version>
+            <scope>provided</scope>
+        </dependency>
+
+        <!-- BCrypt 密码哈希：纯 Java，随插件打包 -->
+        <dependency>
+            <groupId>at.favre.lib</groupId>
+            <artifactId>bcrypt</artifactId>
+            <version>0.10.2</version>
+        </dependency>
+        <dependency>
+            <groupId>at.favre.lib</groupId>
+            <artifactId>bytes</artifactId>
+            <version>1.5.0</version>
+        </dependency>
+
+        <!-- SQLite JDBC 驱动：随插件打包。
+             重要：sqlite 内含各平台原生库，资源路径不可重定位！ -->
+        <dependency>
+            <groupId>org.xerial</groupId>
+            <artifactId>sqlite-jdbc</artifactId>
+            <version>3.46.1.3</version>
+        </dependency>
+
+        <!-- MariaDB JDBC 驱动：database.type = mariadb 时使用，随插件打包。
+             与 sqlite 同理：驱动需通过 META-INF/services 被发现，不重定位 -->
+        <dependency>
+            <groupId>org.mariadb.jdbc</groupId>
+            <artifactId>mariadb-java-client</artifactId>
+            <version>3.4.1</version>
+            <exclusions>
+                <!-- JNA 仅用于命名管道 / Unix socket / Windows SSPI 认证。
+                     驱动在 ConnectionHelper 静态初始化里以 catch(Throwable) 兜住 JNA 缺失
+                     并回退到标准 TCP socket，因此 TCP + 账号密码连接不受影响；
+                     排除后产物小约 3MB。若需用命名管道连接，请自行补回这两个依赖。 -->
+                <exclusion>
+                    <groupId>net.java.dev.jna</groupId>
+                    <artifactId>jna</artifactId>
+                </exclusion>
+                <exclusion>
+                    <groupId>net.java.dev.jna</groupId>
+                    <artifactId>jna-platform</artifactId>
+                </exclusion>
+                <!-- Windows SSPI（域账号集成认证）专用，本插件只用账号密码 -->
+                <exclusion>
+                    <groupId>com.github.waffle</groupId>
+                    <artifactId>waffle-jna</artifactId>
+                </exclusion>
+                <!-- 以下是驱动 POM 里未标 optional 的测试/基准依赖，不排除会被打进插件：
+                     JMH 基准框架（其中 jmh-generator-annprocess 还会作为注解处理器干扰编译）、
+                     MySQL 驱动、以及它自带的 HikariCP（本插件已显式声明同名依赖） -->
+                <exclusion>
+                    <groupId>org.openjdk.jmh</groupId>
+                    <artifactId>jmh-core</artifactId>
+                </exclusion>
+                <exclusion>
+                    <groupId>org.openjdk.jmh</groupId>
+                    <artifactId>jmh-generator-annprocess</artifactId>
+                </exclusion>
+                <exclusion>
+                    <groupId>com.mysql</groupId>
+                    <artifactId>mysql-connector-j</artifactId>
+                </exclusion>
+                <exclusion>
+                    <groupId>com.zaxxer</groupId>
+                    <artifactId>HikariCP</artifactId>
+                </exclusion>
+            </exclusions>
+        </dependency>
+
+        <!-- HikariCP 连接池：仅 MariaDB 后端使用。
+             重定位打包，避免与其它插件（或代理自带）的版本互相干扰 -->
+        <dependency>
+            <groupId>com.zaxxer</groupId>
+            <artifactId>HikariCP</artifactId>
+            <version>5.1.0</version>
+        </dependency>
+
+        <!-- slf4j：显式声明为 provided，防止被 HikariCP 传递引入后打进插件 jar
+             （运行时由 Velocity 提供，与代理日志系统共用） -->
+        <dependency>
+            <groupId>org.slf4j</groupId>
+            <artifactId>slf4j-api</artifactId>
+            <version>2.0.17</version>
+            <scope>provided</scope>
+        </dependency>
+
+        <!-- SnakeYAML：配置/语言文件解析。
+             Velocity 运行时虽自带，但版本不可控，这里重定位打包以保证稳定 -->
+        <dependency>
+            <groupId>org.yaml</groupId>
+            <artifactId>snakeyaml</artifactId>
+            <version>2.2</version>
+        </dependency>
+
+        <!-- 测试：JUnit 5（test 作用域，不进入产物） -->
+        <dependency>
+            <groupId>org.junit.jupiter</groupId>
+            <artifactId>junit-jupiter</artifactId>
+            <version>5.10.2</version>
+            <scope>test</scope>
+        </dependency>
+        <!-- 测试：Mockito（用于 mock final 类与 Velocity 接口，覆盖调度/决策链路） -->
+        <dependency>
+            <groupId>org.mockito</groupId>
+            <artifactId>mockito-core</artifactId>
+            <version>5.14.2</version>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <finalName>MikuAuth-${project.version}</finalName>
+        <plugins>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-compiler-plugin</artifactId>
+                <version>3.13.0</version>
+                <configuration>
+                    <release>25</release>
+                    <!-- 通过注解处理器生成 velocity-plugin.json -->
+                    <annotationProcessorPaths>
+                        <path>
+                            <groupId>com.velocitypowered</groupId>
+                            <artifactId>velocity-api</artifactId>
+                            <version>${velocity.version}</version>
+                        </path>
+                    </annotationProcessorPaths>
+                </configuration>
+            </plugin>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-surefire-plugin</artifactId>
+                <version>3.5.4</version>
+            </plugin>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-shade-plugin</artifactId>
+                <version>3.6.0</version>
+                <executions>
+                    <execution>
+                        <phase>package</phase>
+                        <goals><goal>shade</goal></goals>
+                        <configuration>
+                            <createDependencyReducedPom>false</createDependencyReducedPom>
+                            <transformers>
+                                <transformer implementation="org.apache.maven.plugins.shade.resource.ServicesResourceTransformer"/>
+                            </transformers>
+                            <filters>
+                                <filter>
+                                    <artifact>*:*</artifact>
+                                    <excludes>
+                                        <exclude>META-INF/*.SF</exclude>
+                                        <exclude>META-INF/*.DSA</exclude>
+                                        <exclude>META-INF/*.RSA</exclude>
+                                        <exclude>META-INF/MANIFEST.MF</exclude>
+                                        <exclude>module-info.class</exclude>
+                                        <!-- 多版本 jar 的按 JDK 版本分目录的类：本插件只在 Java 25+ 运行 -->
+                                        <exclude>META-INF/versions/**</exclude>
+                                        <!-- GraalVM 原生镜像元数据：本插件不做 native-image -->
+                                        <exclude>META-INF/native-image/**</exclude>
+                                        <!-- 依赖自带的 maven 元数据与索引：运行时无任何用途 -->
+                                        <exclude>META-INF/maven/**</exclude>
+                                        <exclude>META-INF/INDEX.LIST</exclude>
+                                        <exclude>META-INF/DEPENDENCIES</exclude>
+                                    </excludes>
+                                </filter>
+                                <!--
+                                  SQLite 原生库瘦身（体积从 15.6MB 降到约 3.2MB 的关键）
+                                  ========================================================================
+                                  sqlite-jdbc 自带的原生库覆盖 24 个平台（Android / FreeBSD / ppc64 /
+                                  riscv64 / armv6 / Intel macOS / 各类 ARM …），未压缩总大小 24MB，
+                                  而插件 jar 里绝大部分体积都来自它。这里只保留 3 个平台——覆盖
+                                  实际部署与本机测试环境：
+
+                                    Windows/x86_64      Windows 服务器与本地测试（最常见）
+                                    Linux/x86_64        主流 Linux VPS
+                                    Mac/aarch64         Apple Silicon 本地测试
+
+                                  数据库功能与驱动自身的 Java 类完全不受影响，仅"在未保留的平台
+                                  上运行 SQLite 模式"这一种情况需要恢复：把下面对应的 <exclude>
+                                  行注释掉再 `mvn package` 即可（例如 ARM Linux VPS 恢复
+                                  Linux/aarch64，Intel Mac 恢复 Mac/x86_64，Alpine 容器恢复
+                                  Linux-Musl/x86_64）。
+                                -->
+                                <filter>
+                                    <artifact>org.xerial:sqlite-jdbc</artifact>
+                                    <excludes>
+                                        <!-- 移动端：服务器不会用 -->
+                                        <exclude>org/sqlite/native/Linux-Android/**</exclude>
+                                        <!-- 罕见系统 -->
+                                        <exclude>org/sqlite/native/FreeBSD/**</exclude>
+                                        <!-- 32 位 x86：已基本淘汰 -->
+                                        <exclude>org/sqlite/native/Windows/x86/**</exclude>
+                                        <exclude>org/sqlite/native/Linux/x86/**</exclude>
+                                        <exclude>org/sqlite/native/Linux-Musl/x86/**</exclude>
+                                        <!-- ARM 32 位（armv6/armv7/arm）与 ARM Windows：服务器场景极少 -->
+                                        <exclude>org/sqlite/native/Windows/aarch64/**</exclude>
+                                        <exclude>org/sqlite/native/Windows/armv7/**</exclude>
+                                        <exclude>org/sqlite/native/Linux/arm/**</exclude>
+                                        <exclude>org/sqlite/native/Linux/armv6/**</exclude>
+                                        <exclude>org/sqlite/native/Linux/armv7/**</exclude>
+                                        <exclude>org/sqlite/native/Linux-Musl/aarch64/**</exclude>
+                                        <!-- ARM Linux VPS 与 Alpine 容器：本部署环境不使用 -->
+                                        <exclude>org/sqlite/native/Linux/aarch64/**</exclude>
+                                        <exclude>org/sqlite/native/Linux-Musl/x86_64/**</exclude>
+                                        <!-- Intel Mac：本机测试机为 Apple Silicon，不需要 -->
+                                        <exclude>org/sqlite/native/Mac/x86_64/**</exclude>
+                                        <!-- 大型机 / RISC-V：极罕见 -->
+                                        <exclude>org/sqlite/native/Linux/ppc64/**</exclude>
+                                        <exclude>org/sqlite/native/Linux/riscv64/**</exclude>
+                                    </excludes>
+                                </filter>
+                            </filters>
+                            <relocations>
+                                <!-- 只重定位纯 Java 依赖；sqlite / mariadb 驱动与原生库资源路径绝不可动 -->
+                                <relocation>
+                                    <pattern>org.yaml.snakeyaml</pattern>
+                                    <shadedPattern>cn.miku.auth.lib.snakeyaml</shadedPattern>
+                                </relocation>
+                                <relocation>
+                                    <pattern>com.zaxxer.hikari</pattern>
+                                    <shadedPattern>cn.miku.auth.lib.hikari</shadedPattern>
+                                </relocation>
+                                <relocation>
+                                    <pattern>at.favre.lib.crypto.bcrypt</pattern>
+                                    <shadedPattern>cn.miku.auth.lib.bcrypt</shadedPattern>
+                                </relocation>
+                                <relocation>
+                                    <pattern>at.favre.lib.bytes</pattern>
+                                    <shadedPattern>cn.miku.auth.lib.bytes</shadedPattern>
+                                </relocation>
+                            </relocations>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
+        </plugins>
+    </build>
+</project>

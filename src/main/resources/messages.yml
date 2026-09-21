@@ -1,0 +1,295 @@
+# ============================================================================
+#  MikuAuth 语言文件 —— 所有游戏内可见文本均可在此自定义
+#
+#  说明：
+#   * 支持全部 MiniMessage 标签（<gradient>、<hover>、<click> 等）；
+#   * 同时兼容传统颜色代码 &a、&#RRGGBB；
+#   * {player}、{seconds} 等花括号为占位符，会被自动替换；
+#   * 修改后可通过 /mikuauth reload 热重载；
+#   * 升级插件后缺失的键自动使用内置默认文本，无需重写本文件。
+# ============================================================================
+
+# ----------------------------------------------------------------------------
+# 通用
+# ----------------------------------------------------------------------------
+# 聊天消息前缀（自动拼接在每条聊天提示之前）
+prefix: "<gradient:#00e0ff:#a855f7>MikuAuth</gradient> <dark_gray>»</dark_gray> "
+
+# ----------------------------------------------------------------------------
+# 认证结果提示
+# auth.auto.*      = 免密通过（正版 / 基岩版 / 同 IP 会话）
+# auth.success.*   = 密码认证完成（登录 / 注册成功）
+# 每组含 title（大标题）、subtitle（副标题）、chat（聊天栏）
+# ----------------------------------------------------------------------------
+auth:
+
+  auto:
+    premium:
+      title: "<green>✔ 正版验证通过</green>"
+      subtitle: "<gray>欢迎回来，</gray><yellow>{player}</yellow>"
+      chat: "<green>已通过 Java 正版验证，免密登录。"
+    bedrock:
+      title: "<aqua>✔ 基岩版验证通过</aqua>"
+      subtitle: "<gray>欢迎回来，</gray><yellow>{player}</yellow>"
+      chat: "<aqua>已识别为基岩版玩家，免密登录。"
+    session:
+      title: "<green>✔ 会话有效</green>"
+      subtitle: "<gray>欢迎回来，</gray><yellow>{player}</yellow>"
+      chat: "<green>检测到有效登录会话，本次免密登录。"
+
+  success:
+    login:
+      title: "<green>✔ 登录成功</green>"
+      subtitle: "<gray>欢迎回来，</gray><yellow>{player}</yellow>"
+      chat: "<green>登录成功，祝您游戏愉快！"
+    register:
+      title: "<green>✔ 注册成功</green>"
+      subtitle: "<gray>欢迎加入，</gray><yellow>{player}</yellow>"
+      chat: "<green>注册成功！下次登录请输入 <yellow>/login <密码></yellow>"
+
+# ----------------------------------------------------------------------------
+# 待认证提示（Title / BossBar 循环显示）
+# login    = 已注册账号等待登录
+# register = 未注册账号等待注册
+# {seconds} = 剩余秒数（仅 BossBar）
+# ----------------------------------------------------------------------------
+login:
+
+  title: "<gradient:#ffd700:#ff8800>请 登 录</gradient>"
+  subtitle: "<gray>输入</gray> <yellow>/login <密码></yellow> <gray>完成登录</gray>"
+  # {seconds} = 剩余秒数（仅认证配置了超时时使用）
+  bossbar: "<yellow>请在 {seconds} 秒内完成登录"
+  # 不限时（timeout-seconds = 0）时使用的静态 BossBar 文本
+  bossbar-static: "<yellow>请完成登录后开始游戏"
+  chat-usage: "<gray>请输入</gray> <yellow>/login <密码></yellow> <gray>完成登录"
+
+register:
+
+  title: "<gradient:#00e0ff:#a855f7>请 注 册</gradient>"
+  subtitle: "<gray>输入</gray> <yellow>/register <密码> <确认密码></yellow> <gray>完成注册</gray>"
+  # {seconds} = 剩余秒数（仅认证配置了超时时使用）
+  bossbar: "<yellow>请在 {seconds} 秒内完成注册"
+  # 不限时（timeout-seconds = 0）时使用的静态 BossBar 文本
+  bossbar-static: "<yellow>请完成注册后开始游戏"
+  chat-usage: "<gray>请输入</gray> <yellow>/register <密码> <确认密码></yellow> <gray>完成注册"
+
+# ----------------------------------------------------------------------------
+# 修改密码（/changepassword，需先完成登录）
+# ----------------------------------------------------------------------------
+changepassword:
+
+  usage: "<gray>用法：</gray><yellow>/changepassword <当前密码> <新密码> <确认新密码>"
+  success: "<green>密码修改成功。为保证安全，已清除该账号的同 IP 会话免密记录。"
+  # 账号没有密码（正版自动登记，或密码被管理员删除）
+  no-password: "<red>你的账号当前没有密码，无需修改。\n<gray>正版账号自动免密；如需密码，请先完成一次注册流程。"
+  # 当前密码错误 + 本次触发了临时封禁（{minutes} = 封禁分钟数）
+  wrong-locked: "<red>当前密码错误次数过多，已被临时封禁 {minutes} 分钟。"
+
+# ----------------------------------------------------------------------------
+# Dialog 对话框文本（原版 1.21.6+ 对话框菜单）
+# 仅在使用 Dialog 时显示；版本过低或未装 PacketEvents 时不会用到。
+# ----------------------------------------------------------------------------
+dialog:
+
+  login:
+    title: "<gradient:#ffd700:#ff8800>登录验证</gradient>"
+    # {seconds} = 认证剩余秒数
+    body: "<gray>欢迎回来，</gray><yellow>{player}</yellow><gray>！</gray>\n<yellow>剩余认证时间：{seconds} 秒</yellow>\n<gray>请在下方输入框中输入密码后点击按钮完成登录。</gray>\n<dark_gray>提示：点击「返回聊天栏」按钮可改用聊天栏登录。</dark_gray>"
+    input-label: "<yellow>游戏密码</yellow>"
+    button: "<green>确认登录</green>"
+    button-tooltip: "<gray>点击提交密码</gray>"
+    close-button: "<yellow>返回聊天栏</yellow>"
+    close-button-tooltip: "<gray>关闭对话框，改用 /login 命令登录</gray>"
+
+  register:
+    title: "<gradient:#00e0ff:#a855f7>账号注册</gradient>"
+    # {seconds} = 认证剩余秒数
+    body: "<gray>首次进入，</gray><yellow>{player}</yellow><gray>！</gray>\n<yellow>剩余认证时间：{seconds} 秒</yellow>\n<gray>请在下方设置密码（需在两个输入框中输入相同内容）。</gray>\n<dark_gray>提示：点击「返回聊天栏」按钮可改用聊天栏注册。</dark_gray>"
+    input-label: "<yellow>设置密码</yellow>"
+    confirm-label: "<yellow>确认密码</yellow>"
+    button: "<green>完成注册</green>"
+    button-tooltip: "<gray>点击提交注册信息</gray>"
+    close-button: "<yellow>返回聊天栏</yellow>"
+    close-button-tooltip: "<gray>关闭对话框，改用 /register 命令注册</gray>"
+
+# ----------------------------------------------------------------------------
+# 错误提示（聊天栏）
+# 注意：不支持 Dialog 的玩家会直接看到这些提示；
+#       使用 Dialog 的玩家在提交失败后会重新弹出对话框并显示相同内容。
+# ----------------------------------------------------------------------------
+error:
+
+  # 已通过认证后再次执行 /login 或 /register
+  # （常见原因：{duration} 分钟内同 IP 进入时由会话免密自动登录；或正版/基岩版免密进入）
+  already-authed: "<red>你已通过验证，无需注册或登录。</red>\n<gray>若你尚未注册此账号却看到本提示，可能是同 IP 会话免密已自动登录（本会话由之前的登录产生，{duration} 分钟内有效）。</gray>"
+
+  # 状态与流程不匹配
+  please-register: "<red>你的账号尚未注册，请先执行 <yellow>/register <密码> <确认密码>"
+  please-login: "<red>你的账号已注册，请执行 <yellow>/login <密码>"
+
+  # 密码校验
+  password-empty: "<red>请输入密码。"
+  password-length: "<red>密码长度需在 {min} ~ {max} 个字符之间。"
+  password-mismatch: "<red>两次输入的密码不一致，请重新输入。"
+  password-wrong: "<red>密码错误，请重新输入。"
+  # 密码含空白字符或控制字符（命令通道无法安全承载）
+  password-invalid-chars: "<red>密码不能包含空格、制表符等空白字符，请重新输入。"
+  # 改密时新旧密码相同
+  password-same: "<red>新密码不能与当前密码相同。"
+  # 改密时旧密码错误
+  old-password-wrong: "<red>当前密码错误，请重新输入。"
+  # 密码错误 + 本次触发了临时封禁（{minutes} = 封禁分钟数）
+  password-wrong-locked: "<red>密码错误次数过多，你的 IP 或账号已被临时封禁 {minutes} 分钟。"
+  # 密码错误 + 检测到昵称冲突时附加显示
+  password-wrong-conflict: "<red>检测到昵称冲突：该昵称当前对应一个正版账号。如果你是正版玩家，说明该昵称已被离线账号占用，请联系管理员处理。"
+
+  # 账号状态
+  not-registered: "<red>你的账号尚未注册。"
+  already-registered: "<red>该昵称已被注册，请直接登录或更换昵称。"
+
+  # IP 限制
+  ip-limit: "<red>你的 IP 注册的账号数量已达上限，如有疑问请联系管理员。"
+
+  # 提交过于频繁（同 IP 短时间重复提交 / 同账号并发提交）
+  too-fast: "<red>操作过于频繁，请稍候再试。"
+
+  # 触发跨会话临时封禁（{minutes} = 剩余分钟数）
+  locked: "<red>登录失败次数过多，已被临时封禁，请在 {minutes} 分钟后重试。\n<gray>若这不是你本人的操作，请联系管理员。"
+
+  # 服务端内部异常（数据库故障、密码计算队列已满等）
+  server-busy: "<red>服务器繁忙或出现内部错误，请稍后重试。\n<gray>若持续出现，请联系管理员查看控制台日志。"
+
+  # 未认证玩家使用白名单外命令
+  must-authenticate: "<red>请先完成登录或注册后再使用该命令。"
+
+  # 控制台/非玩家来源执行玩家命令
+  players-only: "<red>该命令仅玩家可用。"
+
+# ----------------------------------------------------------------------------
+# 踢出原因（连接界面 / 断开画面）
+# ----------------------------------------------------------------------------
+kick:
+
+  # 三个正版验证源全部失败且 fail-closed 开启时
+  premium-verify-failed: "<red>无法完成正版验证服务检测，请稍后重试。\n<gray>若此问题持续出现，请联系管理员。"
+
+  # 登录决策阶段发生内部异常（数据库故障等），无法判定登录模式
+  auth-error: "<red>认证服务暂时不可用，请稍后重试。\n<gray>若此问题持续出现，请联系管理员查看控制台日志。"
+
+  # 正版 UUID 与注册记录不匹配（昵称抢注防护）
+  name-snipe: "<red>身份校验失败：该昵称已被其他正版账号使用。\n<gray>如你认为这是误判，请联系管理员。"
+
+  # 认证超时
+  auth-timeout: "<red>登录验证超时，请重新连接后再试。"
+
+  # 密码错误次数过多
+  too-many-tries: "<red>密码错误次数过多，请稍后再试。\n<gray>多次失败可能触发安全防护，请确认密码后重试。"
+
+# ----------------------------------------------------------------------------
+# 管理命令反馈（/mikuauth ...，需要 mikuauth.admin 权限）
+# ----------------------------------------------------------------------------
+admin:
+
+  # /mikuauth 帮助（多行）
+  help:
+    - "<gradient:#00e0ff:#a855f7>MikuAuth</gradient> <gray>管理命令：</gray>"
+    - "<yellow>/mikuauth accounts <玩家></yellow> <dark_gray>-</dark_gray> <gray>查询玩家 IP 名下账号</gray>"
+    - "<yellow>/mikuauth audit <玩家></yellow> <dark_gray>-</dark_gray> <gray>查看登录审计（也可 audit ip <IP>）</gray>"
+    - "<yellow>/mikuauth diagnose <玩家></yellow> <dark_gray>-</dark_gray> <gray>诊断玩家无法进服的原因</gray>"
+    - "<yellow>/mikuauth passwd <玩家></yellow> <dark_gray>-</dark_gray> <gray>交互式重置密码（推荐，密码不进命令历史）</gray>"
+    - "<yellow>/mikuauth setpassword <玩家> <新密码></yellow> <dark_gray>-</dark_gray> <gray>重置密码（保留账号，密码会留在命令历史）</gray>"
+    - "<yellow>/mikuauth deletepassword <玩家></yellow> <dark_gray>-</dark_gray> <gray>删除密码（账号回到未注册）</gray>"
+    - "<yellow>/mikuauth unbind <玩家></yellow> <dark_gray>-</dark_gray> <gray>清除正版绑定（正版改名后的死记录）</gray>"
+    - "<yellow>/mikuauth unlock <玩家|IP></yellow> <dark_gray>-</dark_gray> <gray>解除登录失败的临时封禁</gray>"
+    - "<yellow>/mikuauth limit [数量]</yellow> <dark_gray>-</dark_gray> <gray>查看/设置每 IP 账号上限</gray>"
+    - "<yellow>/mikuauth reload</yellow> <dark_gray>-</dark_gray> <gray>重载配置与语言文件</gray>"
+
+  # 参数不足时的用法提示。{usage} = 用法
+  usage: "<red>用法：{usage}"
+
+  # 通用错误。{reason} = 失败原因
+  error: "<red>操作失败：{reason}"
+
+  # 查询名下账号
+  accounts:
+    # {player} = 查询目标，{ip} = 查询到的 IP，{count} = 账号数
+    header: "<gradient:#00e0ff:#a855f7>账号查询</gradient> <dark_gray>»</dark_gray> <gray>玩家</gray> <yellow>{player}</yellow> <gray>(IP: {ip}) 名下共 {count} 个账号：</gray>"
+    # {player} = 账号名，{type} = 正版/离线，{password} = 已设置/未设置，{time} = 注册时间
+    entry: "<gray> - </gray><yellow>{player}</yellow> <dark_gray>[</dark_gray>{type}<gray> · 密码</gray>{password}<gray> · {time}</gray><dark_gray>]</dark_gray>"
+    not-found: "<red>未找到玩家 {player} 的账号记录。"
+    no-ip: "<red>玩家 {player} 的账号记录中没有 IP 信息，无法反查名下账号。"
+
+  # 进服诊断（判定链路回放）
+  diagnose:
+    # {player} = 昵称
+    header: "<gradient:#00e0ff:#a855f7>进服诊断</gradient> <dark_gray>»</dark_gray> <yellow>{player}</yellow>"
+    db-none: "<gray>数据库记录：无（未注册）</gray>"
+    # {uuid} = 正版 UUID
+    db-premium: "<gray>数据库记录：正版登记（UUID: {uuid}）</gray>"
+    db-offline: "<gray>数据库记录：离线账号（密码已设置）</gray>"
+    db-offline-no-password: "<gray>数据库记录：离线账号（密码未设置）</gray>"
+    # {source} = 验证源
+    api-disabled: "<gray>正版查询：未启用（所有玩家走离线验证）</gray>"
+    api-premium: "<gray>正版查询：<green>确认为正版</green>（来源: {source}）</gray>"
+    api-offline: "<gray>正版查询：该昵称无正版账号</gray>"
+    api-unknown: "<gray>正版查询：<red>所有验证源失败</red></gray>"
+    decision-online: "<gray>进服决策：<yellow>强制正版会话校验</yellow> —— 仅正版客户端可进入；盗版客户端将被原生「无效会话」错误拒绝（此提示由客户端显示，代理无法自定义）</gray>"
+    decision-offline: "<gray>进服决策：<yellow>离线模式</yellow> —— 所有客户端需密码登录或注册</gray>"
+    decision-deny: "<gray>进服决策：<red>直接拒绝</red> —— 所有验证源失败且 fail-closed 已开启</gray>"
+    # 昵称冲突说明。{player} = 昵称
+    conflict: "<red>⚠ 检测到昵称冲突：该昵称已被离线账号占用，但当前对应一个正版账号。正版玩家进入时会被要求输入离线账号的密码（表现为「密码错误」）。如需释放该昵称，执行 /mikuauth deletepassword {player}</red>"
+
+  # 删除密码
+  deletepassword:
+    success: "<green>已删除玩家 {player} 的密码，该账号将在下次进入时重新注册。"
+    not-found: "<red>未找到玩家 {player} 的账号记录。"
+
+  # 重置密码（保留账号，同时清除同 IP 会话免密记录）
+  setpassword:
+    success: "<green>已重置玩家 {player} 的密码，其同 IP 会话免密记录已一并清除。\n<gray>提示：密码写在命令行会被记入服务器命令历史，建议改用 <white>/mikuauth passwd <玩家></white> 由聊天栏输入。"
+    not-found: "<red>未找到玩家 {player} 的账号记录。"
+
+  # 交互式重置密码：密码由聊天栏输入，不经过命令行，因此不会留在命令历史里
+  passwd:
+    prompt: "<yellow>请在聊天栏输入玩家 <white>{player}</white> 的新密码</yellow>\n<gray>60 秒内有效。该消息不会广播给其他玩家，也不会记入命令历史。</gray>"
+    timeout: "<red>输入超时，密码未修改。请重新执行 /mikuauth passwd <玩家>。"
+    console-unsupported: "<gray>控制台无法交互式输入，请改用 <white>/mikuauth setpassword <玩家> <新密码></white></gray>\n<gray>（注意：该方式会把密码写入命令历史，完成后可按需清理 .console_history）</gray>"
+
+  # 清除正版绑定（正版玩家改名后，旧昵称会持续被强制正版校验导致永久不可用）
+  unbind:
+    success: "<green>已清除玩家 {player} 的正版绑定，该昵称将按离线账号处理（若未设密码则重新注册）。"
+    not-found: "<red>玩家 {player} 不存在，或该账号本就没有正版绑定。"
+
+  # 解除临时封禁
+  unlock:
+    success: "<green>已解除 {subject} 的登录失败封禁。"
+    not-found: "<gray>{subject} 当前没有封禁记录（参数填玩家名或 IP）。"
+
+  # 账号迁移。{source} 来源插件，{mode} 试运行/正式执行，{total}/{imported}/{skipped}/{noPassword} 各项计数
+  migrate:
+    start: "<gray>开始从 <yellow>{source}</yellow> 迁移账号（{mode}）…</gray>"
+    done: "<green>{source} 迁移完成：</green> <gray>共读到</gray> <yellow>{total}</yellow> <gray>条，写入</gray> <yellow>{imported}</yellow> <gray>条，跳过</gray> <yellow>{skipped}</yellow> <gray>条。</gray>"
+    no-password-tip: "<yellow>其中 {count} 个账号的密码算法无法沿用（如 Argon2），这些玩家需重新设置密码（管理员可用 setpassword）。"
+    unknown-source: "<red>未知的迁移来源：{source}</red> <gray>可选：{sources}</gray>"
+    failed: "<red>迁移失败：{reason}"
+    dry-run-tip: "<aqua>以上为试运行结果，未写入任何数据。确认无误后去掉 --dry-run 再执行一次。"
+    not-allowed: "<red>位置 {location} 不在允许范围内。</red>\n<gray>当前白名单：</gray><yellow>{allowed}</yellow><gray>（config.yml 的 migrate.allowed-prefixes，留空表示不限制）</gray>"
+    security-tip: "<gray>提示：迁移来的旧算法哈希会在玩家首次登录时自动升级为 BCrypt；如需强制全员重置，可用 unbind/deletepassword。"
+
+  # 审计日志查询。{key} = 查询对象（玩家名或 IP），{count} = 条数
+  audit:
+    header: "<gradient:#00e0ff:#a855f7>登录审计</gradient> <dark_gray>»</dark_gray> <yellow>{key}</yellow> <gray>最近 {count} 条：</gray>"
+    # {time} 时间，{player} 昵称，{ip} 来源 IP，{action} 事件，{detail} 说明
+    entry: "<dark_gray> -</dark_gray> <gray>{time}</gray> <dark_gray>|</dark_gray> <yellow>{player}</yellow> <dark_gray>|</dark_gray> <gray>{ip}</gray> <dark_gray>|</dark_gray> <white>{action}</white> <dark_gray>|</dark_gray> <gray>{detail}</gray>"
+    none: "<gray>没有查到 <yellow>{key}</yellow> 的审计记录。"
+    disabled: "<gray>审计日志已关闭（config.yml 的 audit.enabled）。"
+
+  # IP 限号
+  limit:
+    current: "<gray>当前每 IP 账号上限：</gray><yellow>{limit}</yellow> <dark_gray>（0 = 不限制）</dark_gray>"
+    set: "<green>每 IP 账号上限已临时设置为 </green><yellow>{limit}</yellow><green>（重启后恢复配置文件值，请同步修改 config.yml）。"
+    invalid: "<red>无效的数量：{input}，请输入大于等于 0 的整数。"
+
+  # 重载
+  reload:
+    done: "<green>配置与语言文件已重载（含正版验证源与缓存参数）。"

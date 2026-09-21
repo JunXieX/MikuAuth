@@ -1,0 +1,47 @@
+# ===== 构建产物 =====
+build/
+target/
+out/
+*.jar
+*.war
+*.zip
+*.tar.gz
+dependency-reduced-pom.xml
+
+# ===== 构建工具 =====
+.gradle/
+gradle-app.setting
+.mvn/wrapper/maven-wrapper.jar
+# Gradle Wrapper 的 jar 属于构建工具本体，必须入库
+!gradle/wrapper/gradle-wrapper.jar
+
+# ===== IDE =====
+.idea/
+*.iml
+*.ipr
+*.iws
+.vscode/
+*.swp
+*.swo
+
+# ===== 运行环境 / 日志 =====
+run/
+logs/
+plugins/
+*.log
+crash-reports/
+
+# ===== 本地数据库（仅用于调试，运行时数据在 plugins/MikuAuth 下）=====
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+
+# ===== 系统 =====
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ===== 本地工作记录（不属于插件源码）=====
+.workbuddy/
+MikuAuth-代码理解报告.md

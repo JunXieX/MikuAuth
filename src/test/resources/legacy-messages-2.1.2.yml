@@ -1,0 +1,179 @@
+# ============================================================================
+#  MikuAuth 语言文件 —— 所有游戏内可见文本均可在此自定义
+#
+#  说明：
+#   * 支持全部 MiniMessage 标签（<gradient>、<hover>、<click> 等）；
+#   * 同时兼容传统颜色代码 &a、&#RRGGBB；
+#   * {player}、{seconds} 等花括号为占位符，会被自动替换；
+#   * 修改后可通过 /mikuauth reload 热重载；
+#   * 升级插件后缺失的键自动使用内置默认文本，无需重写本文件。
+# ============================================================================
+
+# ----------------------------------------------------------------------------
+# 通用
+# ----------------------------------------------------------------------------
+# 聊天消息前缀（自动拼接在每条聊天提示之前）
+prefix: "<gradient:#00e0ff:#a855f7>MikuAuth</gradient> <dark_gray>»</dark_gray> "
+
+# ----------------------------------------------------------------------------
+# 认证结果提示
+# auth.auto.*      = 免密通过（正版 / 基岩版 / 同 IP 会话）
+# auth.success.*   = 密码认证完成（登录 / 注册成功）
+# 每组含 title（大标题）、subtitle（副标题）、chat（聊天栏）
+# ----------------------------------------------------------------------------
+auth:
+
+  auto:
+    premium:
+      title: "<green>✔ 正版验证通过</green>"
+      subtitle: "<gray>欢迎回来，</gray><yellow>{player}</yellow>"
+      chat: "<green>已通过 Java 正版验证，免密登录。"
+    bedrock:
+      title: "<aqua>✔ 基岩版验证通过</aqua>"
+      subtitle: "<gray>欢迎回来，</gray><yellow>{player}</yellow>"
+      chat: "<aqua>已识别为基岩版玩家，免密登录。"
+    session:
+      title: "<green>✔ 会话有效</green>"
+      subtitle: "<gray>欢迎回来，</gray><yellow>{player}</yellow>"
+      chat: "<green>检测到有效登录会话，本次免密登录。"
+
+  success:
+    login:
+      title: "<green>✔ 登录成功</green>"
+      subtitle: "<gray>欢迎回来，</gray><yellow>{player}</yellow>"
+      chat: "<green>登录成功，祝您游戏愉快！"
+    register:
+      title: "<green>✔ 注册成功</green>"
+      subtitle: "<gray>欢迎加入，</gray><yellow>{player}</yellow>"
+      chat: "<green>注册成功！下次登录请输入 <yellow>/login <密码></yellow>"
+
+# ----------------------------------------------------------------------------
+# 待认证提示（Title / BossBar 循环显示）
+# login    = 已注册账号等待登录
+# register = 未注册账号等待注册
+# {seconds} = 剩余秒数（仅 BossBar）
+# ----------------------------------------------------------------------------
+login:
+
+  title: "<gradient:#ffd700:#ff8800>请 登 录</gradient>"
+  subtitle: "<gray>输入</gray> <yellow>/login <密码></yellow> <gray>完成登录</gray>"
+  bossbar: "<yellow>请在 {seconds} 秒内完成登录"
+  chat-usage: "<gray>请输入</gray> <yellow>/login <密码></yellow> <gray>完成登录"
+
+register:
+
+  title: "<gradient:#00e0ff:#a855f7>请 注 册</gradient>"
+  subtitle: "<gray>输入</gray> <yellow>/register <密码> <确认密码></yellow> <gray>完成注册</gray>"
+  bossbar: "<yellow>请在 {seconds} 秒内完成注册"
+  chat-usage: "<gray>请输入</gray> <yellow>/register <密码> <确认密码></yellow> <gray>完成注册"
+
+# ----------------------------------------------------------------------------
+# Dialog 对话框文本（原版 1.21.6+ 对话框菜单）
+# 仅在使用 Dialog 时显示；版本过低或未装 PacketEvents 时不会用到。
+# ----------------------------------------------------------------------------
+dialog:
+
+  login:
+    title: "<gradient:#ffd700:#ff8800>登录验证</gradient>"
+    body: "<gray>欢迎回来，</gray><yellow>{player}</yellow><gray>！</gray>\n<gray>请在下方输入框中输入密码后点击按钮完成登录。</gray>\n<dark_gray>提示：按 Esc 可关闭对话框，改用聊天栏登录。</dark_gray>"
+    input-label: "<yellow>游戏密码</yellow>"
+    button: "<green>确认登录</green>"
+    button-tooltip: "<gray>点击提交密码</gray>"
+
+  register:
+    title: "<gradient:#00e0ff:#a855f7>账号注册</gradient>"
+    body: "<gray>首次进入，</gray><yellow>{player}</yellow><gray>！</gray>\n<gray>请在下方设置密码（需在两个输入框中输入相同内容）。</gray>\n<dark_gray>提示：按 Esc 可关闭对话框，改用聊天栏注册。</dark_gray>"
+    input-label: "<yellow>设置密码</yellow>"
+    confirm-label: "<yellow>确认密码</yellow>"
+    button: "<green>完成注册</green>"
+    button-tooltip: "<gray>点击提交注册信息</gray>"
+
+# ----------------------------------------------------------------------------
+# 错误提示（聊天栏）
+# 注意：不支持 Dialog 的玩家会直接看到这些提示；
+#       使用 Dialog 的玩家在提交失败后会重新弹出对话框并显示相同内容。
+# ----------------------------------------------------------------------------
+error:
+
+  # 已通过认证后再次执行 /login 或 /register
+  already-authed: "<red>你已完成认证，无需重复操作。"
+
+  # 状态与流程不匹配
+  please-register: "<red>你的账号尚未注册，请先执行 <yellow>/register <密码> <确认密码>"
+  please-login: "<red>你的账号已注册，请执行 <yellow>/login <密码>"
+
+  # 密码校验
+  password-empty: "<red>请输入密码。"
+  password-length: "<red>密码长度需在 {min} ~ {max} 个字符之间。"
+  password-mismatch: "<red>两次输入的密码不一致，请重新输入。"
+  password-wrong: "<red>密码错误，请重新输入。"
+
+  # 账号状态
+  not-registered: "<red>你的账号尚未注册。"
+  already-registered: "<red>该昵称已被注册，请直接登录或更换昵称。"
+
+  # IP 限制
+  ip-limit: "<red>你的 IP 注册的账号数量已达上限，如有疑问请联系管理员。"
+
+# ----------------------------------------------------------------------------
+# 踢出原因（连接界面 / 断开画面）
+# ----------------------------------------------------------------------------
+kick:
+
+  # 三个正版验证源全部失败且 fail-closed 开启时
+  premium-verify-failed: "<red>无法完成正版验证服务检测，请稍后重试。\n<gray>若此问题持续出现，请联系管理员。"
+
+  # 正版 UUID 与注册记录不匹配（昵称抢注防护）
+  name-snipe: "<red>身份校验失败：该昵称已被其他正版账号使用。\n<gray>如你认为这是误判，请联系管理员。"
+
+  # 认证超时
+  auth-timeout: "<red>登录验证超时，请重新连接后再试。"
+
+  # 密码错误次数过多
+  too-many-tries: "<red>密码错误次数过多，请稍后再试。\n<gray>多次失败可能触发安全防护，请确认密码后重试。"
+
+# ----------------------------------------------------------------------------
+# 管理命令反馈（/mikuauth ...，需要 mikuauth.admin 权限）
+# ----------------------------------------------------------------------------
+admin:
+
+  # /mikuauth 帮助（多行）
+  help:
+    - "<gradient:#00e0ff:#a855f7>MikuAuth</gradient> <gray>管理命令：</gray>"
+    - "<yellow>/mikuauth accounts <玩家></yellow> <dark_gray>-</dark_gray> <gray>查询玩家 IP 名下账号</gray>"
+    - "<yellow>/mikuauth password <玩家></yellow> <dark_gray>-</dark_gray> <gray>查询玩家密码信息</gray>"
+    - "<yellow>/mikuauth deletepassword <玩家></yellow> <dark_gray>-</dark_gray> <gray>删除玩家密码</gray>"
+    - "<yellow>/mikuauth limit [数量]</yellow> <dark_gray>-</dark_gray> <gray>查看/设置每 IP 账号上限</gray>"
+    - "<yellow>/mikuauth reload</yellow> <dark_gray>-</dark_gray> <gray>重载配置与语言文件</gray>"
+
+  # 参数不足时的用法提示。{usage} = 用法
+  usage: "<red>用法：{usage}"
+
+  # 查询名下账号
+  accounts:
+    # {player} = 查询目标，{ip} = 查询到的 IP，{count} = 账号数
+    header: "<gradient:#00e0ff:#a855f7>账号查询</gradient> <dark_gray>»</dark_gray> <gray>玩家</gray> <yellow>{player}</yellow> <gray>(IP: {ip}) 名下共 {count} 个账号：</gray>"
+    # {player} = 账号名，{type} = 正版/离线，{password} = 已设置/未设置，{time} = 注册时间
+    entry: "<gray> - </gray><yellow>{player}</yellow> <dark_gray>[</dark_gray>{type}<gray> · 密码</gray>{password}<gray> · {time}</gray><dark_gray>]</dark_gray>"
+    not-found: "<red>未找到玩家 {player} 的账号记录。"
+
+  # 查询密码
+  password:
+    not-found: "<red>未找到玩家 {player} 的账号记录。"
+    # {player} = 玩家，{hash} = 哈希（未设置时为 -），{type} = 账号类型，{time} = 注册时间
+    result: "<gradient:#00e0ff:#a855f7>密码查询</gradient> <dark_gray>»</dark_gray> <gray>玩家</gray> <yellow>{player}</yellow> <gray>[</gray>{type}<gray> · 注册于 {time}</gray><gray>]</gray>\n<gray>密码哈希（点击可复制）：</gray>"
+
+  # 删除密码
+  deletepassword:
+    success: "<green>已删除玩家 {player} 的密码，该账号将在下次进入时重新注册。"
+    not-found: "<red>未找到玩家 {player} 的账号记录。"
+
+  # IP 限号
+  limit:
+    current: "<gray>当前每 IP 账号上限：</gray><yellow>{limit}</yellow> <dark_gray>（0 = 不限制）</dark_gray>"
+    set: "<green>每 IP 账号上限已临时设置为 </green><yellow>{limit}</yellow><green>（重启后恢复配置文件值，请同步修改 config.yml）。"
+    invalid: "<red>无效的数量：{input}，请输入大于等于 0 的整数。"
+
+  # 重载
+  reload:
+    done: "<green>配置与语言文件已重载。"

@@ -1,0 +1,48 @@
+name: Build
+
+on:
+  push:
+    branches: ["**"]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 25
+        uses: actions/setup-java@v4
+        with:
+          java-version: '25'
+          distribution: 'temurin'
+          cache: maven
+
+      # verify 会连带执行测试（surefire），比 package 更能挡住“编译过但测试挂”的提交。
+      # MariaDbBackendTest 在未提供 -Dmikuauth.test.mariadb.host 时会自动跳过。
+      - name: Build and test
+        run: mvn -B -ntp verify
+
+      - name: Show artifacts
+        run: ls -lh target/*.jar
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: MikuAuth
+          # 不用 target/*.jar：shade 会把替换前的原始 jar 留成 original-MikuAuth-<版本>.jar，
+          # 用通配会把它一起传上去，用户可能误取到未打包依赖的那个
+          path: target/MikuAuth-*.jar
+          if-no-files-found: error
+
+      - name: Publish Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: target/MikuAuth-*.jar
+          prerelease: ${{ contains(github.ref_name, 'Beta') }}
+          generate_release_notes: true
