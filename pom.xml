@@ -216,7 +216,10 @@
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-shade-plugin</artifactId>
-                <version>3.6.0</version>
+                <!-- 3.6.2 自带 ASM 9.9.1（认 Java 25 / class 69）。
+                     3.6.0 及更早内置 ASM 9.7，只认到 Java 23，重定位时会直接失败：
+                     "Problem shading JAR ... Unsupported class file major version 69" -->
+                <version>3.6.2</version>
                 <executions>
                     <execution>
                         <phase>package</phase>
