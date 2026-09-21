@@ -55,19 +55,12 @@
             <version>${velocity.version}</version>
             <scope>provided</scope>
         </dependency>
-        <!-- Adventure 文本组件（Velocity 运行时自带） -->
-        <dependency>
-            <groupId>net.kyori</groupId>
-            <artifactId>adventure-api</artifactId>
-            <version>4.26.1</version>
-            <scope>provided</scope>
-        </dependency>
-        <dependency>
-            <groupId>net.kyori</groupId>
-            <artifactId>adventure-text-minimessage</artifactId>
-            <version>4.26.1</version>
-            <scope>provided</scope>
-        </dependency>
+        <!-- Adventure 文本组件（Component / MiniMessage）。
+             不在此钉版本：velocity-api 4.2.0 通过 net.kyori:adventure-bom:5.2.0 统一管理
+             Adventure 版本，它作为 provided 依赖会把同名构件以 provided 传递过来，
+             版本天然与代理一致。曾钉过 4.26.1，结果与 5.2.0 的 minimessage 打架，
+             测试直接抛 NoSuchMethodError: ComponentFlattener.toBuilder() -->
+
         <!-- Gson：Velocity 运行时自带，用于解析正版验证 API 的 JSON 响应 -->
         <dependency>
             <groupId>com.google.code.gson</groupId>
@@ -184,11 +177,14 @@
             <version>5.10.2</version>
             <scope>test</scope>
         </dependency>
-        <!-- 测试：Mockito（用于 mock final 类与 Velocity 接口，覆盖调度/决策链路） -->
+        <!-- 测试：Mockito（用于 mock final 类与 Velocity 接口，覆盖调度/决策链路）。
+             版本必须够新：Mockito 5.14.2 带的 Byte Buddy 只认到 Java 24（class 68），
+             在 Java 25 上会抛 "Java 25 (69) is not supported by the current version of Byte Buddy"。
+             5.23.0 带的 byte-buddy 1.17.7 已支持 Java 25 -->
         <dependency>
             <groupId>org.mockito</groupId>
             <artifactId>mockito-core</artifactId>
-            <version>5.14.2</version>
+            <version>5.23.0</version>
             <scope>test</scope>
         </dependency>
     </dependencies>
