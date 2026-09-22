@@ -45,9 +45,11 @@ final class MariaDbBackend implements SqlBackend {
 
     private final HikariDataSource dataSource;
     private final Settings settings;
+    private final Logger logger;
 
     MariaDbBackend(Settings settings, Logger logger) throws SQLException {
         this.settings = settings;
+        this.logger = logger;
         try {
             // 与 SQLite 同理：插件类加载器下 ServiceLoader 自动发现不可靠，显式加载一次
             Class.forName("org.mariadb.jdbc.Driver");
@@ -65,7 +67,10 @@ final class MariaDbBackend implements SqlBackend {
         config.setMinimumIdle(Math.min(2, settings.poolSize()));
         // 等待池中空闲连接的上限（区别于驱动侧的 connectTimeout）
         config.setConnectionTimeout(settings.connectionTimeoutMillis());
-        config.setValidationTimeout(Math.max(1000, settings.connectionTimeoutMillis() / 2));
+        // Hikari 要求 validationTimeout <= connectionTimeout，否则会告警并自行回退；
+        // 而 connection-timeout-millis 允许配到 500ms，硬取 max(1000, ...) 会越界
+        config.setValidationTimeout(Math.min(settings.connectionTimeoutMillis(),
+                Math.max(1000, settings.connectionTimeoutMillis() / 2)));
         config.setAutoCommit(true);
         config.setMaxLifetime(30 * 60_000L);
         config.setIdleTimeout(10 * 60_000L);
@@ -126,12 +131,26 @@ final class MariaDbBackend implements SqlBackend {
 
     @Override
     public void swapPlayersTable(Connection connection, String migratingTable) throws SQLException {
-        // MariaDB 支持一条语句原子换名，避免"旧表已删、新表没改成"的中间态
+        // MariaDB 支持一条语句原子换名，避免"旧表已删、新表没改成"的中间态。
+        //
+        // 但**不要**在这里 DROP 旧表：MySQL/MariaDB 的 DDL 会隐式提交，
+        // 所以"事务里换表"并不构成可回滚的操作（调用方 DatabaseManager 里那句
+        // setAutoCommit(false) 对 DDL 无效）。旧表改名为带时间戳的备份表保留下来，
+        // 万一新表有问题（列长截断、字符集），管理员还能恢复。
+        String backup = backupTableName();
         try (Statement statement = connection.createStatement()) {
-            statement.executeUpdate("RENAME TABLE miku_players TO miku_players_legacy, "
+            statement.executeUpdate("RENAME TABLE miku_players TO " + backup + ", "
                     + migratingTable + " TO miku_players");
-            statement.executeUpdate("DROP TABLE miku_players_legacy");
         }
+        if (logger != null) {
+            logger.warn("[数据库] 升级前的账号表已保留为 {}（确认新表无误后可手动删除）", backup);
+        }
+    }
+
+    /** 旧表备份名：带时间戳，多次升级不会互相覆盖。 */
+    static String backupTableName() {
+        return "miku_players_legacy_" + java.time.LocalDateTime.now()
+                .format(java.time.format.DateTimeFormatter.ofPattern("yyyyMMddHHmmss"));
     }
 
     @Override
@@ -146,7 +165,24 @@ final class MariaDbBackend implements SqlBackend {
                     PRIMARY KEY (nickname_lower),
                     KEY idx_sessions_expires (expires_at)
                 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci""",
-                auditLogDdl("miku_audit_log"));
+                auditLogDdl("miku_audit_log"),
+                // 老库补索引：表已存在时上面的 CREATE TABLE IF NOT EXISTS 不会补索引。
+                // MariaDB 支持 CREATE INDEX IF NOT EXISTS；MySQL 会报"duplicate key name"，
+                // 由 DatabaseManager 识别为可忽略的结构错误。
+                "CREATE INDEX IF NOT EXISTS idx_audit_ip ON miku_audit_log (ip, id)");
+    }
+
+    @Override
+    public String purgeSessionsSql() {
+        // MariaDB 不允许在 IN 子查询里直接用 LIMIT，必须套一层派生表
+        return "DELETE FROM miku_sessions WHERE nickname_lower IN (SELECT nickname_lower FROM "
+                + "(SELECT nickname_lower FROM miku_sessions WHERE expires_at <= ? LIMIT ?) AS batch)";
+    }
+
+    @Override
+    public String purgeAuditSql() {
+        return "DELETE FROM miku_audit_log WHERE id IN (SELECT id FROM "
+                + "(SELECT id FROM miku_audit_log WHERE created_at < ? LIMIT ?) AS batch)";
     }
 
     @Override
@@ -172,7 +208,8 @@ final class MariaDbBackend implements SqlBackend {
                     created_at     BIGINT       NOT NULL,
                     PRIMARY KEY (id),
                     KEY idx_audit_nickname (nickname_lower, created_at),
-                    KEY idx_audit_created (created_at)
+                    KEY idx_audit_created (created_at),
+                    KEY idx_audit_ip (ip, id)
                 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci""".formatted(tableName);
     }
 

@@ -25,6 +25,9 @@ class PremiumResolver {
 
     /**
      * 执行一次查询。任何失败都以 UNKNOWN 收尾，绝不抛出异常。
+     *
+     * <p>结果的 {@code authoritative} 直接取自数据源本身（只有 Mojang 官方 API 为真）：
+     * 调用方据此决定"能否按此结论清理数据库记录 / 做负缓存"。
      */
     PremiumResolution resolve(String username) {
         try {
@@ -33,7 +36,7 @@ class PremiumResolver {
 
             // 明确“无此正版账号” → 离线
             if (config.isNotFound(status)) {
-                return PremiumResolution.offline(config.id(), "http " + status);
+                return PremiumResolution.offline(config.id(), "http " + status, config.authoritative());
             }
             // 200 → 解析 UUID 与规范昵称
             if (status == 200) {
@@ -59,9 +62,9 @@ class PremiumResolver {
         }
         // 规范昵称与请求昵称大小写不敏感地一致才可信（防止镜像站返回错误档案）
         if (!nameRaw.equalsIgnoreCase(username)) {
-            return PremiumResolution.offline(config.id(), "昵称不匹配");
+            return PremiumResolution.offline(config.id(), "昵称不匹配", config.authoritative());
         }
-        return PremiumResolution.premium(uuid, nameRaw, config.id());
+        return PremiumResolution.premium(uuid, nameRaw, config.id(), config.authoritative());
     }
 
     /** Mojang 返回无连字符的 32 位原始 UUID；镜像源返回标准格式。 */

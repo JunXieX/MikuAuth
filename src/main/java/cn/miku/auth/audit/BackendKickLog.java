@@ -89,9 +89,12 @@ public final class BackendKickLog {
     public BackendKickLog(Path dataDirectory, MikuConfig config, Logger logger) {
         this.logger = logger;
         String configured = config.backendKickLogFile();
+        // 文件名落地前先做越界检查：否则 "..\..\server.properties" 之类的配置值
+        // 会让记录内容被追加到数据目录之外的文件里
         this.file = configured == null || configured.isBlank()
                 ? null
-                : dataDirectory.resolve(configured.trim());
+                : cn.miku.auth.util.PathSafety.resolveInside(
+                        dataDirectory, configured, "backend-kicks.log", logger);
         this.writer = new ThreadPoolExecutor(1, 1, 0L, TimeUnit.MILLISECONDS,
                 new LinkedBlockingQueue<>(QUEUE_CAPACITY),
                 runnable -> {

@@ -85,7 +85,7 @@ class DatabaseManagerTest {
     void loginFromAnotherIpCountsTowardsThatIp() throws Exception {
         database.register(UUID.randomUUID(), "Alice", "hash", StoredPlayer.TYPE_OFFLINE, "10.0.0.1")
                 .get(5, TimeUnit.SECONDS);
-        database.recordLogin("Alice", "10.0.0.2").get(5, TimeUnit.SECONDS);
+        database.finishLogin("Alice", "10.0.0.2", 0L).get(5, TimeUnit.SECONDS);
 
         assertEquals(1, database.countAccountsByIp("10.0.0.2").get(5, TimeUnit.SECONDS));
         List<StoredPlayer> accounts = database.findAccountsByIp("10.0.0.2").get(5, TimeUnit.SECONDS);

@@ -130,6 +130,9 @@ error:
   # 密码校验
   password-empty: "<red>请输入密码。"
   password-length: "<red>密码长度需在 {min} ~ {max} 个字符之间。"
+  # 密码过长：BCrypt 的硬上限是 72 字节（非 ASCII 字符按 3 字节计），
+  # 超了会在哈希阶段失败，表现为"注册报繁忙 / 改密无反应"，因此在入口处就拦下
+  password-too-long: "<red>密码过长（上限 {bytes} 字节）。请缩短，或减少汉字等非 ASCII 字符。"
   password-mismatch: "<red>两次输入的密码不一致，请重新输入。"
   password-wrong: "<red>密码错误，请重新输入。"
   # 密码含空白字符或控制字符（命令通道无法安全承载）
@@ -208,6 +211,7 @@ admin:
     - "<yellow>/mikuauth accounts <玩家></yellow> <dark_gray>-</dark_gray> <gray>查询玩家 IP 名下账号</gray>"
     - "<yellow>/mikuauth audit <玩家></yellow> <dark_gray>-</dark_gray> <gray>查看登录审计（也可 audit ip <IP>）</gray>"
     - "<yellow>/mikuauth diagnose <玩家></yellow> <dark_gray>-</dark_gray> <gray>诊断玩家无法进服的原因</gray>"
+    - "<yellow>/mikuauth migrate <来源> <位置> [--dry-run]</yellow> <dark_gray>-</dark_gray> <gray>从其他登录插件迁移账号</gray>"
     - "<yellow>/mikuauth passwd <玩家></yellow> <dark_gray>-</dark_gray> <gray>交互式重置密码（推荐，密码不进命令历史）</gray>"
     - "<yellow>/mikuauth setpassword <玩家> <新密码></yellow> <dark_gray>-</dark_gray> <gray>重置密码（保留账号，密码会留在命令历史）</gray>"
     - "<yellow>/mikuauth deletepassword <玩家></yellow> <dark_gray>-</dark_gray> <gray>删除密码（账号回到未注册）</gray>"

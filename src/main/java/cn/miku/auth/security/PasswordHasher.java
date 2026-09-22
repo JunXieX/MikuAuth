@@ -1,6 +1,7 @@
 package cn.miku.auth.security;
 
 import at.favre.lib.crypto.bcrypt.BCrypt;
+import at.favre.lib.crypto.bcrypt.LongPasswordStrategies;
 
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
@@ -89,12 +90,33 @@ public final class PasswordHasher {
             return false;
         }
         return switch (detect(stored)) {
-            case BCRYPT -> BCrypt.verifyer().verify(password.toCharArray(), stored).verified;
+            case BCRYPT -> verifyBcrypt(password, stored);
             case AUTHME_SHA256 -> verifyAuthMe(password, stored, PREFIX_SHA256, "SHA-256");
             case AUTHME_SHA512 -> verifyAuthMe(password, stored, PREFIX_SHA512, "SHA-512");
             case AUTHME_MD5 -> constantTimeEquals(hex(md5(password)), stored.toLowerCase(Locale.ROOT));
             case UNKNOWN -> false;
         };
+    }
+
+    /**
+     * 校验 BCrypt 哈希。
+     *
+     * <p>favre 实现默认是 <b>strict</b> 策略：密码超过 72 <b>字节</b> 会抛
+     * {@code IllegalArgumentException} 而不是静默截断（这个默认是安全的，本插件自己产生的
+     * 哈希也不会超限，因为 {@link PasswordPolicy} 已按字节数拦下）。
+     *
+     * <p>但迁移来源（bcryptjs、LimboAuth 等）普遍按"截断到 72 字节"实现：用 strict 校验这些
+     * 账号会<b>永远失败</b>——能建号却登不进，且每次都被计为密码错误、可能触发临时封禁。
+     * 因此这里先严格校验，抛异常时再按截断重试一次，两种历史实现都能通过。
+     */
+    private static boolean verifyBcrypt(String password, String stored) {
+        try {
+            return BCrypt.verifyer().verify(password.toCharArray(), stored).verified;
+        } catch (IllegalArgumentException tooLongByStrictPolicy) {
+            return BCrypt.verifyer(BCrypt.Version.VERSION_2A,
+                    LongPasswordStrategies.truncate(BCrypt.Version.VERSION_2A))
+                    .verify(password.toCharArray(), stored).verified;
+        }
     }
 
     /**
@@ -108,7 +130,9 @@ public final class PasswordHasher {
             return false;
         }
         String salt = body.substring(0, split);
-        String expected = body.substring(split + 1);
+        // 十六进制大小写不敏感：MD5 分支一直是这么做的，SHA 分支早期漏了这一层，
+        // 遇到大写十六进制的历史哈希会永远校验失败（能建号却登不进）
+        String expected = body.substring(split + 1).toLowerCase(Locale.ROOT);
         String innerHex = hex(digest(password, algo));
         String computed = hex(digest(innerHex + salt, algo));
         return constantTimeEquals(computed, expected);

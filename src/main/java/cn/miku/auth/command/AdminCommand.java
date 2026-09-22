@@ -13,6 +13,7 @@ import java.util.Date;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 
 /**
@@ -39,6 +40,15 @@ public final class AdminCommand implements SimpleCommand {
             "accounts", "audit", "migrate", "diagnose", "deletepassword", "setpassword", "passwd",
             "unbind", "unlock", "limit", "reload");
 
+    /**
+     * 未认证玩家也允许执行的子命令（只读或只影响插件自身状态）。
+     *
+     * <p>其余子命令都是<b>写操作</b>：删密码 / 重置密码 / 清除正版绑定 / 解锁 / 改配额上限 /
+     * 迁移账号。未认证玩家绝不能碰 —— 见 {@link #execute(Invocation)} 里的说明。
+     */
+    private static final Set<String> READ_ONLY_SUB_COMMANDS =
+            Set.of("accounts", "audit", "diagnose", "reload");
+
     private final MikuAuthPlugin plugin;
 
     public AdminCommand(MikuAuthPlugin plugin) {
@@ -54,7 +64,19 @@ public final class AdminCommand implements SimpleCommand {
             sendHelp(invocation, messages);
             return;
         }
-        switch (args[0].toLowerCase(Locale.ROOT)) {
+        String sub = args[0].toLowerCase(Locale.ROOT);
+        // 未认证玩家的写操作一律拒绝。
+        // AuthListener 会在认证前放行 /mikuauth（本意只是允许 reload 之类的只读操作），
+        // 而这里若只校验权限节点，在离线模式下（身份键由昵称推导）攻击者只要抢在管理员
+        // 之前用管理员的昵称连入，就拿到与管理员相同的 UUID → 权限插件给出同样的权限
+        // → /mikuauth setpassword <受害者> <自己的密码> 即可接管他人账号，
+        // 且账号接管不需要受害者在线。故写操作必须要求"本连接已通过认证"。
+        if (!READ_ONLY_SUB_COMMANDS.contains(sub) && invocation.source() instanceof Player player
+                && !plugin.authManager().isAllowed(player)) {
+            invocation.source().sendMessage(messages.prefixed("error.must-authenticate", Map.of()));
+            return;
+        }
+        switch (sub) {
             case "accounts" -> requireArgs(invocation, args, 2, "accounts <玩家>",
                     () -> queryAccounts(invocation, args[1]));
             case "audit" -> requireArgs(invocation, args, 2, "audit <玩家> | audit ip <IP>",
@@ -85,8 +107,8 @@ public final class AdminCommand implements SimpleCommand {
      * 帮助管理员确认"玩家无法进服"的原因（如与正版玩家 ID 冲突）。
      */
     private void diagnose(Invocation invocation, String target) {
-        invocation.source().sendMessage(plugin.renderAdmin(
-                plugin.messages().raw("admin.diagnose.header").replace("{player}", target)));
+        invocation.source().sendMessage(plugin.messages().component("admin.diagnose.header",
+                Map.of("player", target)));
         plugin.authManager().diagnoseAsync(target)
                 .thenAccept(report -> {
                     sendLine(invocation, report.dbLine());
@@ -130,8 +152,16 @@ public final class AdminCommand implements SimpleCommand {
                         Map.of("player", target)));
                 return;
             }
-            plugin.database().findAccountsByIp(ip).thenAccept(accounts ->
-                    sendAccountList(source, target, ip, accounts));
+            plugin.database().findAccountsByIp(ip)
+                    .thenAccept(accounts -> sendAccountList(source, target, ip, accounts))
+                    // 内层 future 的异常必须单独观察：挂在外层链上的 exceptionally 收不到它，
+                    // 而 CompletableFuture 会把未观察的异常悄悄吞掉（管理员什么都不显示、日志也没有）
+                    .exceptionally(throwable -> {
+                        plugin.logger().error("[管理] 账号查询失败: {}", throwable.toString());
+                        source.sendMessage(plugin.messages().prefixed("admin.error",
+                                Map.of("reason", String.valueOf(throwable.getMessage()))));
+                        return null;
+                    });
         }).exceptionally(throwable -> {
             source.sendMessage(plugin.messages().prefixed("admin.error",
                     Map.of("reason", String.valueOf(throwable.getMessage()))));
@@ -141,22 +171,17 @@ public final class AdminCommand implements SimpleCommand {
 
     private void sendAccountList(CommandSource source, String target, String ip, List<StoredPlayer> accounts) {
         SimpleDateFormat format = new SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.ROOT);
-        StringBuilder lines = new StringBuilder(
-                plugin.messages().raw("admin.accounts.header")
-                        .replace("{player}", target)
-                        .replace("{ip}", ip)
-                        .replace("{count}", String.valueOf(accounts.size())));
+        // 一律走 messages.component(key, 占位符)：占位符值会被转义，
+        // 手写 replace 会绕过这层保护（把可控文本变成可解析的 MiniMessage 标签）
+        source.sendMessage(plugin.messages().component("admin.accounts.header",
+                Map.of("player", target, "ip", ip, "count", String.valueOf(accounts.size()))));
         for (StoredPlayer account : accounts) {
-            lines.append('\n').append(plugin.messages().raw("admin.accounts.entry")
-                    .replace("{player}", account.nickname())
-                    .replace("{type}", account.isPremiumType() ? "正版" : "离线")
-                    .replace("{password}", account.hasPassword() ? "已设置" : "未设置")
-                    .replace("{time}", account.registerTime() > 0
-                            ? format.format(new Date(account.registerTime())) : "未知"));
-        }
-        // 多行文本逐行渲染，保持 MiniMessage 颜色标签生效
-        for (String line : lines.toString().split("\n")) {
-            source.sendMessage(plugin.renderAdmin(line));
+            source.sendMessage(plugin.messages().component("admin.accounts.entry", Map.of(
+                    "player", account.nickname(),
+                    "type", account.isPremiumType() ? "正版" : "离线",
+                    "password", account.hasPassword() ? "已设置" : "未设置",
+                    "time", account.registerTime() > 0
+                            ? format.format(new Date(account.registerTime())) : "未知")));
         }
     }
 
@@ -172,7 +197,14 @@ public final class AdminCommand implements SimpleCommand {
             String key = success ? "admin.deletepassword.success" : "admin.deletepassword.not-found";
             source.sendMessage(plugin.messages().prefixed(key, Map.of("player", target)));
             if (success) {
-                plugin.database().clearSession(target);
+                auditAdmin("deletepassword", invocation, target);
+                // 会话清理是"释放昵称"的安全前提：失败必须留痕，否则新注册者会被旧会话免密放行
+                plugin.database().clearSession(target).exceptionally(throwable -> {
+                    plugin.logger().error("[管理] 清除 {} 的会话失败: {}", target, throwable.toString());
+                    source.sendMessage(plugin.messages().prefixed("admin.error",
+                            Map.of("reason", "会话清理失败，详见控制台")));
+                    return null;
+                });
             }
         }).exceptionally(throwable -> {
             source.sendMessage(plugin.messages().prefixed("admin.error",
@@ -193,6 +225,7 @@ public final class AdminCommand implements SimpleCommand {
             String key = changed ? "admin.unbind.success" : "admin.unbind.not-found";
             source.sendMessage(plugin.messages().prefixed(key, Map.of("player", target)));
             if (changed) {
+                auditAdmin("unbind（清除正版绑定）", invocation, target);
                 // 让缓存中的决策立即失效，无需等玩家重连
                 plugin.authManager().invalidateLoginDecision(target);
             }
@@ -238,11 +271,16 @@ public final class AdminCommand implements SimpleCommand {
             source.sendMessage(plugin.messages().prefixed(violation.messageKey(), violation.placeholders()));
             return;
         }
-        plugin.authManager().resetPassword(target, password).thenAccept(updated ->
-                source.sendMessage(plugin.messages().prefixed(
-                        updated ? "admin.setpassword.success" : "admin.setpassword.not-found",
-                        Map.of("player", target)))
-        ).exceptionally(throwable -> {
+        plugin.authManager().resetPassword(target, password).thenAccept(updated -> {
+            source.sendMessage(plugin.messages().prefixed(
+                    updated ? "admin.setpassword.success" : "admin.setpassword.not-found",
+                    Map.of("player", target)));
+            if (Boolean.TRUE.equals(updated)) {
+                // 重置密码是本插件权限最高、最需要追责的操作，必须留痕（此前只有交互式
+                // /mikuauth passwd 会记审计，最常用的 setpassword 反而完全不可见）
+                auditAdmin("setpassword（重置密码）", invocation, target);
+            }
+        }).exceptionally(throwable -> {
             source.sendMessage(plugin.messages().prefixed("admin.error",
                     Map.of("reason", String.valueOf(throwable.getMessage()))));
             return null;
@@ -255,6 +293,9 @@ public final class AdminCommand implements SimpleCommand {
         invocation.source().sendMessage(plugin.messages().prefixed(
                 cleared ? "admin.unlock.success" : "admin.unlock.not-found",
                 Map.of("subject", subject)));
+        if (cleared) {
+            auditAdmin("unlock（解除临时封禁）", invocation, subject);
+        }
     }
 
     /** 查看登录审计日志：{@code audit <玩家>} 或 {@code audit ip <IP>}。 */
@@ -262,6 +303,14 @@ public final class AdminCommand implements SimpleCommand {
         CommandSource source = invocation.source();
         if (!plugin.config().auditEnabled()) {
             source.sendMessage(plugin.messages().prefixed("admin.audit.disabled", Map.of()));
+            return;
+        }
+        // audit 的用法是 "audit <玩家>" 或 "audit ip <IP>"：只写 "audit ip" 时
+        // 旧实现会把它当成"查询昵称为 ip 的玩家"，返回"没有查到 ip 的审计记录"，
+        // 管理员会误以为审计为空/坏了
+        if ("ip".equalsIgnoreCase(args[1]) && args.length < 3) {
+            source.sendMessage(plugin.messages().prefixed("admin.usage",
+                    Map.of("usage", "/mikuauth audit ip <IP>")));
             return;
         }
         boolean byIp = args.length >= 3 && "ip".equalsIgnoreCase(args[1]);
@@ -277,16 +326,15 @@ public final class AdminCommand implements SimpleCommand {
                 return;
             }
             SimpleDateFormat format = new SimpleDateFormat("MM-dd HH:mm:ss", Locale.ROOT);
-            source.sendMessage(plugin.renderAdmin(plugin.messages().raw("admin.audit.header")
-                    .replace("{key}", key)
-                    .replace("{count}", String.valueOf(entries.size()))));
+            source.sendMessage(plugin.messages().component("admin.audit.header",
+                    Map.of("key", key, "count", String.valueOf(entries.size()))));
             for (var entry : entries) {
-                source.sendMessage(plugin.renderAdmin(plugin.messages().raw("admin.audit.entry")
-                        .replace("{time}", format.format(new Date(entry.createdAt())))
-                        .replace("{player}", nvl(entry.nickname()))
-                        .replace("{ip}", nvl(entry.ip()))
-                        .replace("{action}", describeAudit(entry.action()))
-                        .replace("{detail}", nvl(entry.detail()))));
+                source.sendMessage(plugin.messages().component("admin.audit.entry", Map.of(
+                        "time", format.format(new Date(entry.createdAt())),
+                        "player", nvl(entry.nickname()),
+                        "ip", nvl(entry.ip()),
+                        "action", describeAudit(entry.action()),
+                        "detail", nvl(entry.detail()))));
             }
         }).exceptionally(throwable -> {
             source.sendMessage(plugin.messages().prefixed("admin.error",
@@ -311,7 +359,26 @@ public final class AdminCommand implements SimpleCommand {
             case REJECT_IP_LIMIT -> "IP 超限";
             case ADMIN_ACTION -> "管理员操作";
             case MIGRATE -> "账号迁移";
+            case STALE_ACCOUNT_RELEASED -> "死昵称清理";
+            case UNKNOWN -> "未知事件";
         };
+    }
+
+    /**
+     * 记录管理员写操作（谁、对谁、做了什么）。
+     *
+     * <p>此前只有交互式 {@code /mikuauth passwd} 会写审计，最常用的 {@code setpassword}
+     * 与 {@code deletepassword}/{@code unbind}/{@code unlock}/{@code limit} 全部零留痕 ——
+     * 出事时无法追责，与"审计可回答这个号有没有被人动过"的定位不符。
+     */
+    private void auditAdmin(String action, Invocation invocation, String target) {
+        plugin.audit().record(cn.miku.auth.audit.AuditAction.ADMIN_ACTION, target, null, null,
+                "管理员 " + actorName(invocation) + " 执行 " + action);
+    }
+
+    /** 操作者名称（控制台执行时没有玩家名）。 */
+    private static String actorName(Invocation invocation) {
+        return invocation.source() instanceof Player player ? player.getUsername() : "控制台";
     }
 
     private static String nvl(String value) {
@@ -341,7 +408,14 @@ public final class AdminCommand implements SimpleCommand {
                             "allowed", plugin.config().migrateAllowedPrefixes())));
             return;
         }
-        boolean dryRun = args.length >= 4 && "--dry-run".equalsIgnoreCase(args[3]);
+        // 严格校验可选参数：拼错（--dryrun / --dry-run=true / 多余尾参）时报用法并中止，
+        // 不能"当成 false 继续跑"—— 那会让管理员以为在试运行，实际已经把数据写进库了
+        if (args.length > 4 || (args.length == 4 && !"--dry-run".equalsIgnoreCase(args[3]))) {
+            source.sendMessage(plugin.messages().prefixed("admin.usage",
+                    Map.of("usage", "/mikuauth migrate <来源> <位置> [--dry-run]")));
+            return;
+        }
+        boolean dryRun = args.length == 4;
         source.sendMessage(plugin.messages().prefixed("admin.migrate.start",
                 Map.of("source", parsed.displayName(),
                         "mode", dryRun ? "试运行（不写入）" : "正式执行")));
@@ -380,13 +454,42 @@ public final class AdminCommand implements SimpleCommand {
         if (configured == null || configured.isBlank()) {
             return true;
         }
+        String normalized = normalizeLocation(location);
+        if (normalized == null) {
+            return false;
+        }
         for (String prefix : configured.split(",")) {
             String trimmed = prefix.trim();
-            if (!trimmed.isEmpty() && location.startsWith(trimmed)) {
-                return true;
+            if (!trimmed.isEmpty()) {
+                String normalizedPrefix = normalizeLocation(trimmed);
+                if (normalizedPrefix != null && normalized.startsWith(normalizedPrefix)) {
+                    return true;
+                }
             }
         }
         return false;
+    }
+
+    /**
+     * 归一化迁移位置后再做前缀比较，含 {@code ..} 时返回 null（直接拒绝）。
+     *
+     * <p>直接比较原串可以绕过白名单：白名单 {@code sqlite:/srv/legacy/} 配好后，
+     * {@code sqlite:/srv/legacy/../../etc/secret.db} 依然以它开头，但实际指向白名单之外
+     * （迁移会以服务端身份连接该库）。Windows 下大小写差异同理，故统一小写。
+     */
+    private static String normalizeLocation(String location) {
+        String value = location.trim().replace('\\', '/');
+        if (value.contains("..")) {
+            return null;
+        }
+        for (String prefix : new String[]{"sqlite:", "file:"}) {
+            if (value.regionMatches(true, 0, prefix, 0, prefix.length())) {
+                String path = value.substring(prefix.length());
+                return prefix.toLowerCase(Locale.ROOT)
+                        + java.nio.file.Paths.get(path).normalize().toString().replace('\\', '/');
+            }
+        }
+        return value.toLowerCase(Locale.ROOT);
     }
 
     /**
@@ -414,6 +517,8 @@ public final class AdminCommand implements SimpleCommand {
                 plugin.config().setMaxAccountsPerIpOverride(value);
                 invocation.source().sendMessage(plugin.messages().prefixed("admin.limit.set",
                         Map.of("limit", String.valueOf(value))));
+                // 改配额上限会影响后续注册能否通过，属于写操作，留痕
+                auditAdmin("limit（临时设置每 IP 账号上限=" + value + "）", invocation, "-");
             } catch (NumberFormatException e) {
                 invocation.source().sendMessage(plugin.messages().prefixed("admin.limit.invalid",
                         Map.of("input", args[1])));

@@ -14,7 +14,9 @@ import java.util.regex.Pattern;
  * <ul>
  *   <li>占位符使用 {key} 形式，替换前转义值中的 MiniMessage 标签字符，防止注入；</li>
  *   <li>配置中写错标签不会导致插件崩溃，降级为纯文本输出；</li>
- *   <li>所有解析均为纯函数、无线程共享状态，可在任意线程调用；</li>
+ *   <li>解析本身是纯函数；<b>唯一的共享状态</b>是下文的静态渲染缓存
+ *       （有 1024 上限，键为"渲染前的原文"，因此 reload 改过文本后不会命中旧组件），
+ *       缓存以 {@link java.util.concurrent.ConcurrentHashMap} 承载，可跨线程调用；</li>
  *   <li>无占位符的静态文本（前缀、Title、帮助行等）渲染结果做有界缓存，
  *       Adventure 组件不可变，可安全复用。</li>
  * </ul>

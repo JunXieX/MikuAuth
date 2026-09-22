@@ -498,10 +498,20 @@ public final class AuthManager {
                 return migrateRenamedAccountAsync(username, resolution.uuid())
                         .thenApply(ignored -> applyResolution(username, resolution));
             }
-            // 权威源判定该昵称已不存在：库里若还留着"正版"记录，那就是改名遗留的死昵称
-            if (resolution.isOffline()) {
+            // 只有**权威源**（Mojang 官方 API）明确判定"该昵称不存在"时，才允许清理库里的正版记录。
+            // 镜像仲裁也会给出 OFFLINE（Mojang 不可用 + 镜像 404 / 镜像数据滞后），
+            // 但镜像结论不足以支撑"删记录 + 释放昵称"这种破坏性动作：
+            // 一次误判就会删掉真号主的记录（那是正版玩家首次进入时自动登记的无密码记录），
+            // 随后昵称可被离线客户端抢注，真号主再也进不来。
+            if (resolution.isOffline() && resolution.isAuthoritative()) {
                 return releaseStaleAccountAsync(username, null)
                         .thenApply(released -> applyResolution(username, resolution));
+            }
+            if (resolution.isOffline()) {
+                // 非权威 OFFLINE：照常按离线流程处理（需要密码/注册），但**不动**库中记录
+                logger.info("[正版验证] {} 的离线结论来自镜像源（{}，非权威），仅按离线处理，不清理库中记录",
+                        username, resolution.source());
+                return CompletableFuture.completedFuture(applyResolution(username, resolution));
             }
             // 冲突（权威源=离线、镜像=正版）：用库中记录判断是历史映射还是抢注。
             // 镜像给出的 UUID 与库中该昵称记录一致 → 是号主改名留下的历史记录，清理并放行；
@@ -566,8 +576,14 @@ public final class AuthManager {
         return withFallback(database.releaseStaleAccount(nickname, historicalUuid).thenApply(released -> {
             if (released) {
                 logger.warn("[死昵称清理] {} 的记录仍标记为正版（UUID {}），但该昵称已不属于它"
-                                + "（玩家在 Mojang 改名）→ 已清理陈旧记录并释放昵称",
+                                + "（权威源判定该昵称不存在，通常是玩家在 Mojang 改名）"
+                                + "→ 已清理陈旧记录并释放昵称",
                         nickname, historicalUuid == null ? "未知" : historicalUuid);
+                // 删除账号记录是破坏性操作，必须留痕（谁被清理、依据是什么）
+                audit.record(AuditAction.STALE_ACCOUNT_RELEASED, nickname, historicalUuid, null,
+                        historicalUuid == null
+                                ? "权威源判定该昵称无正版账号，清理了库中的正版记录并释放昵称"
+                                : "镜像给出的历史 UUID 与库中记录一致（号主改名遗留），已清理并释放昵称");
             }
             return released;
         }), false, "死昵称清理");
@@ -616,10 +632,16 @@ public final class AuthManager {
     private void purgeStaleExpectations() {
         // 正版判定器的两张缓存由它自己按阈值清理
         premium.purgeStale();
+        long now = System.currentTimeMillis();
+        // 交互式改密的等待态主动过期：条目原本只在"又收到一条聊天"时才会被发现已过期，
+        // 于是过期的等待态会一直留着（断线由 cleanup 负责清理）
+        if (!pendingPasswordInputs.isEmpty()) {
+            pendingPasswordInputs.values().removeIf(pending -> pending.expireAt() < now);
+        }
         if (lastLoginModes.size() < 64 && sessionVerifiedNames.size() < 64) {
             return;
         }
-        long cutoff = System.currentTimeMillis() - 60_000L;
+        long cutoff = now - 60_000L;
         lastLoginModes.values().removeIf(record -> record.createdAt() < cutoff);
         // 会话免密标记未被消费（客户端取消/连接中断）时在此过期，避免残留
         sessionVerifiedNames.values().removeIf(markedAt -> markedAt < cutoff);
@@ -1086,29 +1108,12 @@ public final class AuthManager {
             failRegister(player, session, "error.password-mismatch", Map.of());
             return;
         }
-        // IP 配额
-        int maxAccounts = config.maxAccountsPerIp();
-        if (maxAccounts > 0) {
-            database.countAccountsByIp(session.ip).thenAccept(count -> {
-                if (count >= maxAccounts) {
-                    // 拒绝原因是安全事件（同 IP 批量注册），必须落审计便于事后追溯
-                    audit.record(AuditAction.REJECT_IP_LIMIT, session.username, player.getUniqueId(),
-                            session.ip, "该 IP 名下已有 " + count + " 个离线账号，达到上限 " + maxAccounts);
-                    failRegister(player, session, "error.ip-limit", Map.of());
-                } else {
-                    doRegister(player, session, password);
-                }
-            }).exceptionally(throwable -> {
-                logger.error("[MikuAuth] IP 配额查询异常: {}", throwable.toString());
-                failRegister(player, session, "error.server-busy", Map.of());
-                return null;
-            });
-            return;
-        }
-        doRegister(player, session, password);
+        // IP 配额检查与写入合并为一次数据库任务（见 DatabaseManager#registerWithIpLimit）：
+        // 分成"先查后写"两步时，同 IP 并发注册可以双双通过检查，配额形同虚设
+        doRegister(player, session, password, config.maxAccountsPerIp());
     }
 
-    private void doRegister(Player player, AuthSession session, String password) {
+    private void doRegister(Player player, AuthSession session, String password, int maxAccounts) {
         if (!tryAcquireCryptoSlot(session.username, session.ip)) {
             display.chat(player, "error.too-fast", Map.of());
             return;
@@ -1119,13 +1124,20 @@ public final class AuthManager {
                     String hash = BCrypt.withDefaults()
                             .hashToString(config.bcryptCost(), password.toCharArray());
                     // 离线账号的身份键 = 由昵称推导的离线 UUID（与代理分配给玩家的一致）
-                    database.register(UuidUtil.offlineUuid(player.getUsername()), player.getUsername(),
-                                    hash, StoredPlayer.TYPE_OFFLINE, session.ip)
+                    database.registerWithIpLimit(UuidUtil.offlineUuid(player.getUsername()),
+                                    player.getUsername(), hash, StoredPlayer.TYPE_OFFLINE,
+                                    session.ip, maxAccounts)
                             .thenAccept(result -> {
                                 if (result == DatabaseManager.RegisterResult.OK) {
                                     completeAuth(player, session, "auth.success.register", true);
                                 } else if (result == DatabaseManager.RegisterResult.DUPLICATE) {
                                     failRegister(player, session, "error.already-registered", Map.of());
+                                } else if (result == DatabaseManager.RegisterResult.IP_LIMIT) {
+                                    // 拒绝原因是安全事件（同 IP 批量注册），必须落审计便于事后追溯
+                                    audit.record(AuditAction.REJECT_IP_LIMIT, session.username,
+                                            player.getUniqueId(), session.ip,
+                                            "该 IP 名下的离线账号数已达上限 " + maxAccounts);
+                                    failRegister(player, session, "error.ip-limit", Map.of());
                                 } else {
                                     // 真正的数据库故障不能伪装成"昵称已被注册"
                                     failRegister(player, session, "error.server-busy", Map.of());
@@ -1245,7 +1257,16 @@ public final class AuthManager {
                         lock != null ? Map.of("minutes", String.valueOf(lock.remainingMinutes())) : Map.of());
                 return;
             }
-            String hash = BCrypt.withDefaults().hashToString(config.bcryptCost(), newPassword.toCharArray());
+            String hash;
+            try {
+                hash = BCrypt.withDefaults().hashToString(config.bcryptCost(), newPassword.toCharArray());
+            } catch (RuntimeException e) {
+                // 兜底：PasswordPolicy 已按 UTF-8 字节数拦住超长密码，但异常绝不能逃出线程池
+                // ——那样玩家收不到任何反馈（旧密码已校验通过、新密码却没生效）
+                logger.error("[改密] 生成密码哈希失败: {}", e.getMessage());
+                display.chatAlways(player, "error.server-busy", Map.of());
+                return;
+            }
             database.updatePassword(username, hash)
                     .thenCompose(updated -> {
                         if (updated) {
@@ -1441,15 +1462,16 @@ public final class AuthManager {
                 session.ip, auditDetailFor(messageKey));
 
         if (passwordVerified) {
-            // 密码认证成功：清空该 IP/账号的失败计数
+            // 密码认证成功：清空该账号的失败计数（IP 维度保留——否则攻击者用自己
+            // 一个有效账号登录一次，就能把该 IP 的换昵称撞库计数一并清零）
             throttle.reset(session.ip, player.getUsername());
-            // 同 IP 会话：仅密码认证成功后写入（免密进入不续期，到期必须重新输密码）
-            if (config.sessionEnabled()) {
-                long expiresAt = System.currentTimeMillis() + config.sessionDurationMinutes() * 60_000L;
-                database.saveSession(player.getUsername(), session.ip, expiresAt);
-            }
         }
-        database.recordLogin(player.getUsername(), session.ip);
+        // 会话续期 + 最近登录记录合并为一次数据库任务：
+        // 分成两次会让每次登录多占用一次队列任务与连接借用（SQLite 只有 1 个工作线程）
+        long expiresAt = passwordVerified && config.sessionEnabled()
+                ? System.currentTimeMillis() + config.sessionDurationMinutes() * 60_000L
+                : 0L;
+        withFallback(database.finishLogin(player.getUsername(), session.ip, expiresAt), null, "登录收尾");
 
         display.showSuccess(player, messageKey + ".title", messageKey + ".subtitle",
                 Map.of("player", player.getUsername()));
@@ -1459,15 +1481,29 @@ public final class AuthManager {
     }
 
     /** 登录失败反馈：聊天提示 + 支持时重开 Dialog（错误文本追加进对话框正文）。 */
+    /**
+     * 失败反馈：聊天提示 +（登录流程且客户端支持时）重开对话框。
+     *
+     * <p><b>静默态必须在"不重开对话框"的所有路径上解除</b>：Dialog 打开期间
+     * {@code display.chat} 会被静默规则丢弃，若既不重开对话框也不解除静默，
+     * 玩家看到的是"对话框关了、没有任何提示、Title/BossBar 也消失"，只能干等到超时被踢
+     * ——空密码提交正是这条路径（{@code retryDialog=false}）。
+     * 同理，重开失败时也必须补发聊天提示，否则提示同样会丢。
+     */
     private void failLogin(Player player, AuthSession session, String errorKey,
                            Map<String, String> placeholders, boolean retryDialog) {
+        boolean reopen = retryDialog && player.isActive() && "login".equals(session.textKey);
+        if (!reopen) {
+            display.exitSilent(player);
+        }
         display.chat(player, errorKey, placeholders);
-        if (hasNicknameConflict(session)) {
+        boolean conflict = hasNicknameConflict(session);
+        if (conflict) {
             // 该昵称当前对应一个正版账号：正版玩家会被要求输入离线账号的密码
             display.chat(player, "error.password-wrong-conflict", Map.of());
         }
-        if (retryDialog && player.isActive() && "login".equals(session.textKey)) {
-            String extra = hasNicknameConflict(session)
+        if (reopen) {
+            String extra = conflict
                     ? renderText(errorKey, placeholders) + "\n" + renderText("error.password-wrong-conflict", Map.of())
                     : renderText(errorKey, placeholders);
             String error = dialogService.showLogin(player, extra);
@@ -1475,9 +1511,10 @@ public final class AuthManager {
                 session.dialogOpen = true;
                 display.enterSilent(player);
             } else {
-                // 重开失败必须解除静默：否则 DisplayManager 仍处于静默态，
+                // 重开失败必须解除静默并补发提示：否则 DisplayManager 仍处于静默态，
                 // 之后所有聊天提示都会被丢弃，玩家将看不到任何反馈
                 display.exitSilent(player);
+                display.chat(player, errorKey, placeholders);
             }
         }
     }
@@ -1623,9 +1660,7 @@ public final class AuthManager {
     public void handleDisconnect(String username, UUID playerId) {
         cleanup(playerId);
         authenticated.remove(playerId);
-        transfer.forget(playerId);
         premium.forget(playerId, username);
-
 
         // 会话免密标记：玩家在建立连接前断线时清理（正常路径已由 handleConnected 消费）
         sessionVerifiedNames.remove(MikuConfig.normalize(username));
@@ -1634,10 +1669,13 @@ public final class AuthManager {
     private void cleanup(UUID playerId) {
         sessions.remove(playerId);
         transfer.forget(playerId);
-        Player player = server.getPlayer(playerId).orElse(null);
-        if (player != null) {
-            display.stopTracking(player);
-        }
+        // 显示跟踪必须按 UUID 清理：DisconnectEvent 触发时玩家已经不在代理的注册表里了
+        // （velocity-proxy 反编译核对：unregisterConnection 先 removeFromMaps，
+        //  再由 fireDisconnectAndCleanup 发事件），此时 server.getPlayer(uuid) 取不到人，
+        // 旧实现因此漏掉清理、BossBar 与占位符长期驻留
+        display.stopTracking(playerId);
+        // 交互式改密的等待状态也要清：否则管理员断线重连后，下一条普通聊天会被当成新密码消费
+        pendingPasswordInputs.remove(playerId);
     }
 
     // ---------------------------------------------------------------------

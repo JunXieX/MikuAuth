@@ -20,9 +20,13 @@ final class SqliteBackend implements SqlBackend {
     private final Connection connection;
     private final Path dbFile;
 
-    SqliteBackend(Path dataDirectory, String databaseFile) throws SQLException, IOException {
+    SqliteBackend(Path dataDirectory, String databaseFile, org.slf4j.Logger logger)
+            throws SQLException, IOException {
         Files.createDirectories(dataDirectory);
-        this.dbFile = dataDirectory.resolve(databaseFile);
+        // 数据库文件名同样要防越界：database.file 指向数据目录之外时，
+        // 等于允许配置在任意路径创建/覆盖 SQLite 文件
+        this.dbFile = cn.miku.auth.util.PathSafety.resolveInside(
+                dataDirectory, databaseFile, "mikuauth.db", logger);
         try {
             // 显式注册驱动：Velocity 的插件类加载器下 DriverManager 的
             // ServiceLoader 自动发现不可靠，必须手动加载一次
@@ -94,7 +98,21 @@ final class SqliteBackend implements SqlBackend {
                 "CREATE INDEX IF NOT EXISTS idx_sessions_expires ON miku_sessions (expires_at)",
                 auditLogDdl("miku_audit_log"),
                 "CREATE INDEX IF NOT EXISTS idx_audit_nickname ON miku_audit_log (nickname_lower, created_at)",
-                "CREATE INDEX IF NOT EXISTS idx_audit_created ON miku_audit_log (created_at)");
+                "CREATE INDEX IF NOT EXISTS idx_audit_created ON miku_audit_log (created_at)",
+                // /mikuauth audit ip <IP> 用得上：没有它时每次查询都是全表扫描 + 排序
+                "CREATE INDEX IF NOT EXISTS idx_audit_ip ON miku_audit_log (ip, id)");
+    }
+
+    @Override
+    public String purgeSessionsSql() {
+        return "DELETE FROM miku_sessions WHERE nickname_lower IN "
+                + "(SELECT nickname_lower FROM miku_sessions WHERE expires_at <= ? LIMIT ?)";
+    }
+
+    @Override
+    public String purgeAuditSql() {
+        return "DELETE FROM miku_audit_log WHERE id IN "
+                + "(SELECT id FROM miku_audit_log WHERE created_at < ? LIMIT ?)";
     }
 
     @Override

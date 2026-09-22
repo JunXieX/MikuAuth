@@ -50,8 +50,10 @@ public final class DatabaseManager implements AuthRepository, AuditRepository, A
     public enum RegisterResult {
         /** 写入成功。 */
         OK,
-        /** 昵称已存在（主键冲突）。 */
+        /** 昵称或 UUID 已存在（唯一约束冲突）。 */
         DUPLICATE,
+        /** 同 IP 的离线账号数达到上限（配额拒绝，不是故障）。 */
+        IP_LIMIT,
         /** 数据库故障（磁盘满、连接中断、库被锁等）。 */
         ERROR
     }
@@ -69,7 +71,7 @@ public final class DatabaseManager implements AuthRepository, AuditRepository, A
     private static final int QUEUE_CAPACITY = 512;
 
     /** 会话记录快照（同 IP 免密）。 */
-    public record Session(String nicknameLower, String ip, long expiresAt) {
+    public record Session(String ip, long expiresAt) {
     }
 
     /**
@@ -121,7 +123,7 @@ public final class DatabaseManager implements AuthRepository, AuditRepository, A
         if (!"sqlite".equals(type)) {
             logger.warn("[数据库] 未知的 database.type '{}'，已回退 SQLite（可选值：sqlite / mariadb）", type);
         }
-        return new SqliteBackend(dataDirectory, config.databaseFile());
+        return new SqliteBackend(dataDirectory, config.databaseFile(), logger);
     }
 
     /** 建表并设置后端参数。 */
@@ -132,7 +134,18 @@ public final class DatabaseManager implements AuthRepository, AuditRepository, A
             migratePlayersToUuidSchema(connection);
             try (Statement statement = connection.createStatement()) {
                 for (String ddl : backend.schemaStatements()) {
-                    statement.executeUpdate(ddl);
+                    try {
+                        statement.executeUpdate(ddl);
+                    } catch (SQLException e) {
+                        // 索引类语句允许"已存在"：老库升级时需要补建新索引，
+                        // 而不同方言对 CREATE INDEX IF NOT EXISTS 的支持不一致。
+                        // 只有这一类冲突可以放行，其余错误照旧上抛（插件停用并报错）。
+                        if (isAlreadyExists(e)) {
+                            logger.debug("[数据库] 结构语句已生效，跳过: {}", e.getMessage());
+                        } else {
+                            throw e;
+                        }
+                    }
                 }
             }
         } finally {
@@ -141,6 +154,18 @@ public final class DatabaseManager implements AuthRepository, AuditRepository, A
         if (logger != null) {
             logger.info("[数据库] 已就绪：{}", backend.describe());
         }
+    }
+
+    /** 是否为"对象已存在"（重复索引/重复列）这类可安全忽略的结构错误。 */
+    private static boolean isAlreadyExists(SQLException e) {
+        String message = e.getMessage();
+        if (message == null) {
+            return false;
+        }
+        String lower = message.toLowerCase(Locale.ROOT);
+        return lower.contains("already exists")            // SQLite / MariaDB
+                || lower.contains("duplicate key name")    // MySQL 家族
+                || lower.contains("duplicate column name");
     }
 
     // ---------------------------------------------------------------------
@@ -216,6 +241,74 @@ public final class DatabaseManager implements AuthRepository, AuditRepository, A
     }
 
     /**
+     * 注册新账号，并在<b>同一次数据库任务</b>内检查"同 IP 离线账号数"配额。
+     *
+     * <p>原先的"先 {@link #countAccountsByIp(String)} 判定、再 {@link #register} 写入"是两步：
+     * 同 IP 并发注册可以双双通过检查（MariaDB 连接池 6 线程时尤其明显），配额形同虚设。
+     * 这里把判定与写入放进同一次连接借用 —— SQLite 本就单线程串行，MariaDB 下同一连接内
+     * 两条语句之间的窗口也足够小，不再是"检查完等 INSERT"的确定性竞态。
+     *
+     * @param maxAccounts 上限；≤0 表示不限制
+     */
+    public CompletableFuture<RegisterResult> registerWithIpLimit(UUID uuid, String nickname, String passwordHash,
+                                                                String authType, String ip, int maxAccounts) {
+        return supply(connection -> {
+            try {
+                if (maxAccounts > 0 && countAccountsByIp(connection, ip) >= maxAccounts) {
+                    return RegisterResult.IP_LIMIT;
+                }
+                return insertPlayer(connection, uuid, nickname, passwordHash, authType, ip);
+            } catch (SQLException e) {
+                logger.error("[数据库] 注册 {} 失败: {}", nickname, e.getMessage());
+                return RegisterResult.ERROR;
+            }
+        });
+    }
+
+    /** 配额统计（注册路径专用：复用同一个连接，避免"判定与写入不是同一时刻"）。 */
+    private static int countAccountsByIp(Connection connection, String ip) throws SQLException {
+        try (PreparedStatement ps = connection.prepareStatement("""
+                SELECT COUNT(DISTINCT nickname_lower) FROM miku_players
+                WHERE (register_ip = ? OR last_login_ip = ?) AND auth_type <> ?""")) {
+            ps.setString(1, ip);
+            ps.setString(2, ip);
+            ps.setString(3, StoredPlayer.TYPE_PREMIUM);
+            try (ResultSet rs = ps.executeQuery()) {
+                return rs.next() ? rs.getInt(1) : 0;
+            }
+        }
+    }
+
+    /** 插入账号行（注册路径专用）。 */
+    private static RegisterResult insertPlayer(Connection connection, UUID uuid, String nickname,
+                                               String passwordHash, String authType, String ip)
+            throws SQLException {
+        try (PreparedStatement ps = connection.prepareStatement("""
+                INSERT INTO miku_players
+                    (uuid, nickname_lower, display_name, password_hash, auth_type,
+                     register_ip, register_time, last_login_ip, last_login_time)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""")) {
+            long now = System.currentTimeMillis();
+            ps.setString(1, UuidUtil.format(uuid));
+            ps.setString(2, MikuConfig.normalize(nickname));
+            ps.setString(3, nickname);
+            ps.setString(4, passwordHash);
+            ps.setString(5, authType);
+            ps.setString(6, ip);
+            ps.setLong(7, now);
+            ps.setString(8, ip);
+            ps.setLong(9, now);
+            ps.executeUpdate();
+            return RegisterResult.OK;
+        } catch (SQLException e) {
+            if (isUniqueViolation(e)) {
+                return RegisterResult.DUPLICATE;
+            }
+            throw e;
+        }
+    }
+
+    /**
      * 把某 UUID 的账号迁移到新昵称（正版玩家改名后的自动迁移）。
      *
      * <p>只改昵称，密码、注册信息、登录统计全部保留 —— 这正是"用 UUID 保存数据"的意义：
@@ -241,8 +334,23 @@ public final class DatabaseManager implements AuthRepository, AuditRepository, A
         });
     }
 
-    /** 判断是否为唯一约束冲突（SQLite 与 MariaDB 的报错文案不同）。 */
+    /**
+     * 判断是否为唯一约束冲突。
+     *
+     * <p>优先看<b>标准 SQLState</b>（{@code 23505} unique_violation / {@code 23000} 完整性约束），
+     * 再看驱动错误码（MariaDB {@code 1062}、SQLite {@code 19}/{@code 2067}），
+     * 最后才回落到消息文案。只按文案判断在驱动升级或服务端本地化时会失效 ——
+     * 那会把 DUPLICATE 误判成 ERROR（玩家看到"服务器繁忙"），或者把真故障当成"昵称已被注册"。
+     */
     private static boolean isUniqueViolation(SQLException e) {
+        String state = e.getSQLState();
+        if (state != null && (state.equals("23505") || state.equals("23000"))) {
+            return true;
+        }
+        int code = e.getErrorCode();
+        if (code == 1062 || code == 19 || code == 2067) {
+            return true;
+        }
         String message = e.getMessage();
         if (message == null) {
             return false;
@@ -347,14 +455,33 @@ public final class DatabaseManager implements AuthRepository, AuditRepository, A
         });
     }
 
-    /** 记录一次成功登录（更新最近登录 IP 与时间）。 */
-    public CompletableFuture<Void> recordLogin(String nickname, String ip) {
+    /**
+     * 认证成功时的一次性收尾：刷新同 IP 会话 + 记录最近登录 IP/时间。
+     *
+     * <p>合并为<b>一次</b>数据库任务：原先 {@code saveSession} 与 {@code recordLogin} 是两次
+     * 独立任务（两次入队 + 两次连接借用），而 SQLite 只有 1 个工作线程、队列上限 512 ——
+     * 登录高峰期这两次往返都在和审计写入抢同一个线程，突发登录容易被 AbortPolicy 拒绝
+     * （玩家看到"服务器繁忙"）。
+     *
+     * @param expiresAtMillis ≤0 表示本次不写会话（会话免密关闭时）
+     */
+    public CompletableFuture<Void> finishLogin(String nickname, String ip, long expiresAtMillis) {
         return supply(connection -> {
+            String normalized = MikuConfig.normalize(nickname);
+            if (expiresAtMillis > 0) {
+                try (PreparedStatement ps = connection.prepareStatement(backend.upsertSessionSql())) {
+                    ps.setString(1, normalized);
+                    ps.setString(2, ip);
+                    ps.setLong(3, expiresAtMillis);
+                    ps.executeUpdate();
+                }
+            }
             try (PreparedStatement ps = connection.prepareStatement(
-                    "UPDATE miku_players SET last_login_ip = ?, last_login_time = ? WHERE nickname_lower = ?")) {
+                    "UPDATE miku_players SET last_login_ip = ?, last_login_time = ? "
+                            + "WHERE nickname_lower = ?")) {
                 ps.setString(1, ip);
                 ps.setLong(2, System.currentTimeMillis());
-                ps.setString(3, MikuConfig.normalize(nickname));
+                ps.setString(3, normalized);
                 ps.executeUpdate();
             }
             return null;
@@ -423,13 +550,13 @@ public final class DatabaseManager implements AuthRepository, AuditRepository, A
     public CompletableFuture<Optional<Session>> findSession(String nickname) {
         return supply(connection -> {
             try (PreparedStatement ps = connection.prepareStatement(
-                    "SELECT nickname_lower, ip, expires_at FROM miku_sessions "
+                    "SELECT ip, expires_at FROM miku_sessions "
                             + "WHERE nickname_lower = ? AND expires_at > ?")) {
                 ps.setString(1, MikuConfig.normalize(nickname));
                 ps.setLong(2, System.currentTimeMillis());
                 try (ResultSet rs = ps.executeQuery()) {
                     return rs.next()
-                            ? Optional.of(new Session(rs.getString(1), rs.getString(2), rs.getLong(3)))
+                            ? Optional.of(new Session(rs.getString(1), rs.getLong(2)))
                             : Optional.<Session>empty();
                 }
             }
@@ -437,7 +564,8 @@ public final class DatabaseManager implements AuthRepository, AuditRepository, A
     }
 
     /** 删除会话（改密码 / 重置密码后让旧会话立即失效）。 */
-    public CompletableFuture<Void> clearSession(String nickname) {        return supply(connection -> {
+    public CompletableFuture<Void> clearSession(String nickname) {
+        return supply(connection -> {
             try (PreparedStatement ps = connection.prepareStatement(
                     "DELETE FROM miku_sessions WHERE nickname_lower = ?")) {
                 ps.setString(1, MikuConfig.normalize(nickname));
@@ -447,15 +575,39 @@ public final class DatabaseManager implements AuthRepository, AuditRepository, A
         });
     }
 
-    /** 清理全部过期会话，返回删除行数。 */
+    /** 单批清理行数：把一次大删除摊成多批，避免长时间占住唯一的工作线程。 */
+    private static final int PURGE_BATCH_SIZE = 500;
+    /** 单次清理最多执行多少批（剩下的留给下一次心跳，避免清理任务长期占用工作线程）。 */
+    private static final int PURGE_MAX_BATCHES = 20;
+
+    /** 清理全部过期会话，返回删除行数（分批执行）。 */
     public CompletableFuture<Integer> purgeExpiredSessions() {
-        return supply(connection -> {
-            try (PreparedStatement ps = connection.prepareStatement(
-                    "DELETE FROM miku_sessions WHERE expires_at <= ?")) {
-                ps.setLong(1, System.currentTimeMillis());
-                return ps.executeUpdate();
+        return supply(connection -> purgeInBatches(connection, backend.purgeSessionsSql(),
+                System.currentTimeMillis()));
+    }
+
+    /**
+     * 分批执行清理语句。
+     *
+     * <p>一次 {@code DELETE} 掉几十万行会独占 SQLite 的<b>唯一</b>工作线程：期间所有登录、
+     * 注册、会话查询都在排队（队列上限 512，满了直接拒绝登录）。改成"每批
+     * {@value #PURGE_BATCH_SIZE} 行、最多 {@value #PURGE_MAX_BATCHES} 批"后，
+     * 单次占用的时间有上界，剩余部分由下一次心跳继续清。
+     */
+    private static int purgeInBatches(Connection connection, String sql, long cutoff) throws SQLException {
+        int total = 0;
+        try (PreparedStatement ps = connection.prepareStatement(sql)) {
+            for (int i = 0; i < PURGE_MAX_BATCHES; i++) {
+                ps.setLong(1, cutoff);
+                ps.setInt(2, PURGE_BATCH_SIZE);
+                int deleted = ps.executeUpdate();
+                total += deleted;
+                if (deleted < PURGE_BATCH_SIZE) {
+                    break;
+                }
             }
-        });
+        }
+        return total;
     }
 
     // ---------------------------------------------------------------------
@@ -485,10 +637,17 @@ public final class DatabaseManager implements AuthRepository, AuditRepository, A
      *   <li>整表重建为 {@code uuid} 主键 + {@code nickname_lower} 唯一索引。</li>
      * </ol>
      *
-     * <p><b>安全性</b>：迁移在事务中执行；只有在迁移表行数与预期一致时才替换正式表
-     * （MariaDB 用单条 {@code RENAME TABLE} 原子换名）；任何异常都保留原表不动并向上抛出，
-     * 由插件停用并给出明确报错，绝不带着半迁移状态运行。
-     */
+ * <p><b>安全性</b>：
+ * <ul>
+ *   <li>写入迁移表后<b>逐行校验内容</b>（UUID / 昵称 / 密码哈希），任何不一致即回滚并报错
+ *       —— 只比对行数是不够的：MariaDB 在列长不足或非严格模式下会<b>静默截断</b>昵称，
+ *       行数照样对得上；</li>
+ *   <li>替换正式表：SQLite 用可回滚的 DDL 事务（先删后改名）；MariaDB 用单条
+ *       {@code RENAME TABLE} 原子换名，并把旧表保留为<b>带时间戳的备份表</b>
+ *       （MariaDB 的 DDL 会隐式提交，事务对换表并不成立，因此不能靠回滚兜底）；</li>
+ *   <li>其余任何异常都向上抛出，由插件停用并给出明确报错，绝不带着半迁移状态运行。</li>
+ * </ul>
+ */
     private void migratePlayersToUuidSchema(Connection connection) throws SQLException {
         if (!tableExists(connection, "miku_players") || tableHasColumn(connection, "miku_players", "uuid")) {
             return; // 全新安装，或已经是新结构
@@ -553,15 +712,12 @@ public final class DatabaseManager implements AuthRepository, AuditRepository, A
                 ps.executeBatch();
             }
 
-            int migrated = countRows(connection, migrating);
-            if (migrated != kept.size()) {
-                connection.rollback();
-                throw new SQLException("账号表升级校验失败：期望 " + kept.size()
-                        + " 行，实际 " + migrated + " 行，已放弃升级（原表未改动）");
-            }
+            // 校验必须比"行数"更严：MariaDB 在列长不足 / 非严格模式下会**截断**而不是报错，
+            // 行数照样对得上，管理员要到玩家登录失败时才发现
+            verifyMigratedContent(connection, migrating, kept);
             backend.swapPlayersTable(connection, migrating);
             connection.commit();
-            logger.warn("[数据库] 账号表已升级为 UUID 主键，迁移 {} 条记录", migrated);
+            logger.warn("[数据库] 账号表已升级为 UUID 主键，迁移 {} 条记录", kept.size());
             if (!released.isEmpty()) {
                 logger.warn("[数据库] 自动清理了 {} 条同一 UUID 的重复记录（改名遗留），释放昵称: {}",
                         released.size(), String.join(", ", released));
@@ -604,33 +760,96 @@ public final class DatabaseManager implements AuthRepository, AuditRepository, A
         return identifier;
     }
 
-    /** 表是否存在（用零行查询探测，避免依赖各驱动的元数据大小写规则）。 */
-    private static boolean tableExists(Connection connection, String table) {
+    /**
+     * 表是否存在（用零行查询探测，避免依赖各驱动的元数据大小写规则）。
+     *
+     * <p><b>只有"对象不存在"才算 false</b>：早期实现把所有 SQLException 都当成 false，
+     * 于是启动瞬间的一次 SQLITE_BUSY / 权限 / 网络抖动会被判成"表不存在"，
+     * 旧库升级被静默跳过，插件带着旧结构启动（之后每次登录读 uuid 列都抛异常，
+     * 玩家只看到"认证错误"，日志零散难定位）。其余异常一律上抛，让插件明确停用并报错。
+     */
+    private static boolean tableExists(Connection connection, String table) throws SQLException {
         try (Statement statement = connection.createStatement()) {
             statement.executeQuery("SELECT 1 FROM " + requireSafeIdentifier(table) + " WHERE 1=0").close();
             return true;
         } catch (SQLException e) {
-            return false;
+            if (isMissingObject(e)) {
+                return false;
+            }
+            throw e;
         }
     }
 
-    /** 表是否有某列（同上，零行查询探测）。 */
-    private static boolean tableHasColumn(Connection connection, String table, String column) {
+    /** 表是否有某列（同上，零行查询探测；只把"列不存在"当成 false）。 */
+    private static boolean tableHasColumn(Connection connection, String table, String column)
+            throws SQLException {
         try (Statement statement = connection.createStatement()) {
             statement.executeQuery("SELECT " + requireSafeIdentifier(column)
                     + " FROM " + requireSafeIdentifier(table) + " WHERE 1=0").close();
             return true;
         } catch (SQLException e) {
-            return false;
+            if (isMissingObject(e)) {
+                return false;
+            }
+            throw e;
         }
     }
 
-    private static int countRows(Connection connection, String table) throws SQLException {
-        try (Statement statement = connection.createStatement();
-             ResultSet rs = statement.executeQuery(
-                     "SELECT COUNT(*) FROM " + requireSafeIdentifier(table))) {
-            return rs.next() ? rs.getInt(1) : 0;
+    /**
+     * 是否为"表/列不存在"。
+     *
+     * <p>SQLite 的 JDBC 驱动不保证给 SQLState，只能靠文案（`no such table` / `no such column`）
+     * 兜底；MariaDB 则给出标准的 {@code 42S02}（表）/ {@code 42S22}（列）。
+     */
+    private static boolean isMissingObject(SQLException e) {
+        String state = e.getSQLState();
+        if (state != null && (state.startsWith("42S02") || state.startsWith("42S22"))) {
+            return true;
         }
+        String message = e.getMessage();
+        if (message == null) {
+            return false;
+        }
+        String lower = message.toLowerCase(Locale.ROOT);
+        return lower.contains("no such table") || lower.contains("no such column")
+                || lower.contains("doesn't exist") || lower.contains("unknown column")
+                || lower.contains("unknown table");
+    }
+
+    /**
+     * 逐行校验迁移表内容与源数据一致。
+     *
+     * <p>只比对行数挡不住真实的坏情况：MariaDB 的 {@code INSERT} 在列长不足或非严格模式下
+     * 会截断值而不是报错（例如昵称被截成 16 字节），行数完全对得上，
+     * 于是"升级成功"却坏了账号；而且此时旧表已经被换掉。这里比对
+     * UUID、昵称与密码哈希三元组，任何一处不符都回滚并报错。
+     */
+    private static void verifyMigratedContent(Connection connection, String table,
+                                              Map<String, LegacyRow> expected) throws SQLException {
+        Map<String, String> actual = new LinkedHashMap<>();
+        try (Statement statement = connection.createStatement();
+             ResultSet rs = statement.executeQuery("SELECT uuid, nickname_lower, password_hash FROM "
+                     + requireSafeIdentifier(table))) {
+            while (rs.next()) {
+                actual.put(rs.getString(1), fingerprint(rs.getString(2), rs.getString(3)));
+            }
+        }
+        if (actual.size() != expected.size()) {
+            throw new SQLException("账号表升级校验失败：期望 " + expected.size() + " 行，实际 "
+                    + actual.size() + " 行，已放弃升级");
+        }
+        for (Map.Entry<String, LegacyRow> entry : expected.entrySet()) {
+            String wanted = fingerprint(entry.getValue().nicknameLower(), entry.getValue().passwordHash());
+            if (!wanted.equals(actual.get(entry.getKey()))) {
+                throw new SQLException("账号表升级校验失败：UUID " + entry.getKey()
+                        + " 的内容与源数据不一致（疑似被截断或字符集损坏），已放弃升级");
+            }
+        }
+    }
+
+    /** 迁移校验用的内容指纹（昵称 + 密码哈希）。 */
+    private static String fingerprint(String nicknameLower, String passwordHash) {
+        return String.valueOf(nicknameLower) + "\u0000" + String.valueOf(passwordHash);
     }
 
     // ---------------------------------------------------------------------
@@ -689,13 +908,7 @@ public final class DatabaseManager implements AuthRepository, AuditRepository, A
 
     @Override
     public CompletableFuture<Integer> purgeExpiredAudit(long beforeMillis) {
-        return supply(connection -> {
-            try (PreparedStatement ps = connection.prepareStatement(
-                    "DELETE FROM miku_audit_log WHERE created_at < ?")) {
-                ps.setLong(1, beforeMillis);
-                return ps.executeUpdate();
-            }
-        });
+        return supply(connection -> purgeInBatches(connection, backend.purgeAuditSql(), beforeMillis));
     }
 
     private CompletableFuture<List<AuditEntry>> queryAudit(String sql, String key, int limit) {
@@ -736,49 +949,10 @@ public final class DatabaseManager implements AuthRepository, AuditRepository, A
     // ---------------------------------------------------------------------
 
     /**
-     * 迁移写入：直接插入一条账号记录（保留原始密码哈希与历史时间），
-     * 不经过注册流程的 IP 配额检查，也不刷新会话。
-     *
-     * <p>哈希按源插件原样存入——登录时由
-     * {@link cn.miku.auth.security.PasswordHasher} 按格式识别校验，
-     * 并在首次成功登录后自动升级为 BCrypt，因此玩家无需重置密码。
-     *
-     * @return true = 已插入；false = UUID 或昵称已存在（跳过，不覆盖现有账号）
-     */
-    public CompletableFuture<Boolean> importAccount(UUID uuid, String nickname, String passwordHash,
-                                                    String authType, String ip,
-                                                    long registerTime, long lastLoginTime) {
-        return supply(connection -> {
-            try (PreparedStatement ps = connection.prepareStatement("""
-                    INSERT INTO miku_players
-                        (uuid, nickname_lower, display_name, password_hash, auth_type,
-                         register_ip, register_time, last_login_ip, last_login_time)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""")) {
-                ps.setString(1, UuidUtil.format(uuid));
-                ps.setString(2, MikuConfig.normalize(nickname));
-                ps.setString(3, nickname);
-                ps.setString(4, passwordHash);
-                ps.setString(5, authType);
-                ps.setString(6, ip);
-                ps.setLong(7, registerTime > 0 ? registerTime : System.currentTimeMillis());
-                ps.setString(8, ip);
-                ps.setLong(9, lastLoginTime > 0 ? lastLoginTime : 0L);
-                ps.executeUpdate();
-                return true;
-            } catch (SQLException e) {
-                if (isUniqueViolation(e)) {
-                    return false; // 账号已存在：跳过，绝不覆盖现有数据
-                }
-                throw e;
-            }
-        });
-    }
-
-    /**
      * 批量导入账号（迁移专用）。
      *
-     * <p><b>为什么需要它</b>：逐条调用 {@link #importAccount} 会让每条记录都成为一次
-     * 独立的数据库任务，而 SQLite 后端只有 1 个工作线程——迁移期间该线程被持续占满，
+     * <p><b>为什么是批量的</b>：逐条插入会让每条记录都成为一次独立的数据库任务，
+     * 而 SQLite 后端只有 1 个工作线程——迁移期间该线程被持续占满，
      * 在线玩家的登录、注册、会话查询全部排在迁移任务后面。批量写入把 N 条合并为
      * **一次任务 + 一次事务**，把对在线玩家的影响降到最低。
      *
@@ -845,6 +1019,9 @@ public final class DatabaseManager implements AuthRepository, AuditRepository, A
                     connection = backend.borrow();
                     future.complete(work.apply(connection));
                 } catch (Throwable t) {
+                    // 失败必须留痕：大量调用点是 fire-and-forget（会话写入、登录时间、
+                    // 会话清理），future 的异常无人观察时故障会完全静默——排障只能靠猜
+                    logger.warn("[数据库] 异步操作失败: {}", t.toString());
                     future.completeExceptionally(t);
                 } finally {
                     backend.release(connection);

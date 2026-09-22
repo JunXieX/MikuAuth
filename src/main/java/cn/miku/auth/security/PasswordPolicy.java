@@ -2,6 +2,7 @@ package cn.miku.auth.security;
 
 import cn.miku.auth.config.MikuConfig;
 
+import java.nio.charset.StandardCharsets;
 import java.util.Map;
 
 /**
@@ -16,6 +17,15 @@ import java.util.Map;
  * 控制字符则可能截断命令。这类密码必须在入口处就拦掉。
  */
 public final class PasswordPolicy {
+
+    /**
+     * BCrypt 的硬上限：72 <b>字节</b>（留 1 字节余量给实现细节）。
+     *
+     * <p>本插件用的 favre 实现默认策略是 strict —— 超过即抛 {@code IllegalArgumentException}，
+     * 不会静默截断。因此策略层必须按 <b>UTF-8 字节数</b>拦，只按字符数会漏：
+     * 默认上限 32 个字符时，25 个汉字就已经 75 字节，过了策略却会在哈希时抛异常。
+     */
+    private static final int MAX_BCRYPT_BYTES = 71;
 
     /** 违规描述：消息键 + 占位符。 */
     public record Violation(String messageKey, Map<String, String> placeholders) {
@@ -38,6 +48,13 @@ public final class PasswordPolicy {
         if (password.length() < min || password.length() > max) {
             return new Violation("error.password-length",
                     Map.of("min", String.valueOf(min), "max", String.valueOf(max)));
+        }
+        // 字符数合格不等于可用：BCrypt 的限制是字节数（见 MAX_BCRYPT_BYTES）。
+        // 漏掉这一条的真实后果：注册报"服务器繁忙"、改密静默失败、登录被误计为密码错误。
+        int bytes = password.getBytes(StandardCharsets.UTF_8).length;
+        if (bytes > MAX_BCRYPT_BYTES) {
+            return new Violation("error.password-too-long",
+                    Map.of("bytes", String.valueOf(MAX_BCRYPT_BYTES)));
         }
         if (hasUnsupportedChars(password)) {
             return new Violation("error.password-invalid-chars", Map.of());

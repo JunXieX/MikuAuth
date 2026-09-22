@@ -4,11 +4,16 @@ import cn.miku.auth.config.MikuConfig;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
+import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 import org.slf4j.Logger;
 
 /**
@@ -19,22 +24,30 @@ import org.slf4j.Logger;
  * <ol>
  *   <li>Mojang（权威源）返回 PREMIUM → 直接采信；</li>
  *   <li>Mojang 未确认而存在其他源返回 PREMIUM → 采信该源；若此时 Mojang 明确
- *       OFFLINE（数据矛盾）→ 返回 UNKNOWN，由调用方 fail-closed；</li>
+ *       OFFLINE（数据矛盾）→ 返回 UNKNOWN，由调用方 fail-closed；
+ *       <b>冲突检查在快慢两条路径上都成立</b>（快路径只在权威源未给出 OFFLINE 时才提前返回）；</li>
  *   <li>Mojang 明确返回 OFFLINE → 直接采信（权威源）；</li>
- *   <li>Mojang 不可用，且所有启用的镜像源都返回 OFFLINE → 采信 OFFLINE（镜像仲裁）；</li>
+ *   <li>Mojang 不可用，且所有启用的镜像源都返回 OFFLINE → 采信 OFFLINE（镜像仲裁），
+ *       但结果标记为<b>非权威</b>：调用方不得据此清理数据库记录，也不做负缓存；</li>
  *   <li>其余混合情况 → UNKNOWN，由调用方决定是否拒绝登录。</li>
  * </ol>
  *
  * <p>性能与可靠性设计：
  * <ul>
  *   <li>正/负结果分别 TTL 缓存，命中零网络开销；<b>UNKNOWN 不做负缓存</b>，
- *       避免一次网络抖动把某个昵称"锁死"在 fail-closed 拒绝状态；</li>
- *   <li>同昵称并发请求合并为一次外部查询（single-flight）；</li>
+ *       避免一次网络抖动把某个昵称"锁死"在 fail-closed 拒绝状态；
+ *       非权威源的 OFFLINE 同样不缓存（镜像数据滞后，缓存会放大误判窗口）；</li>
+ *   <li>同昵称并发请求合并为一次外部查询（single-flight，基于
+ *       {@code computeIfAbsent} 保证"先占位再发起"，不会重复外发）；</li>
  *   <li>三个 API 并发请求，总耗时 ≈ 最快可用源的耗时，任一源确认正版即提前返回；</li>
  *   <li><b>编排不占用线程池</b>：全部用 {@link CompletableFuture} 组合，线程池只跑叶子
  *       网络任务。历史实现曾在编排体内 {@code join()} 自己的子任务，池大小 6 时
  *       6 个并发查询就会把池占满并永久死锁（可被随机昵称连接触发）；</li>
- *   <li>子任务 catch Throwable 后落成 UNKNOWN，单个源的 Error 不会让整次查询悬挂；</li>
+ *   <li><b>有准入控制</b>：这条路径在 PreLogin 阶段即可被任意昵称触发（不需要先认证），
+ *       因此在途查询数有上限、线程池队列有界；超过上限直接返回 UNKNOWN 而不是无限堆积
+ *       —— 否则随机昵称批量建连就能堆积无界任务并对上游 API 洪泛；</li>
+ *   <li>子任务与其汇总环节都 catch Throwable 并落成 UNKNOWN，单个源的 Error
+ *       不会让整次查询悬挂；</li>
  *   <li>整次查询带兜底超时，任何未预期挂起都退化为 UNKNOWN 而不是永久等待；</li>
  *   <li>缓存容量上限，超限时优先清除过期条目。</li>
  * </ul>
@@ -43,6 +56,10 @@ public final class PremiumService {
 
     /** 内存缓存容量上限。 */
     private static final int MAX_CACHE_SIZE = 10_000;
+    /** 在途查询上限（准入控制）：超过即拒绝新查询，避免上游洪泛与无界堆积。 */
+    private static final int MAX_IN_FLIGHT_QUERIES = 32;
+    /** 外部查询线程池的队列上限（配合 AbortPolicy，拒绝路径已有兜底）。 */
+    private static final int QUEUE_CAPACITY = 256;
     /** 权威源 ID（Mojang）。 */
     private static final String AUTHORITATIVE = "mojang";
 
@@ -59,6 +76,10 @@ public final class PremiumService {
     private final ConcurrentHashMap<String, CachedResolution> cache = new ConcurrentHashMap<>();
     /** 同昵称请求合并。 */
     private final ConcurrentHashMap<String, CompletableFuture<PremiumResolution>> inFlight = new ConcurrentHashMap<>();
+    /** 在途查询数（准入控制用）。 */
+    private final AtomicInteger inFlightCount = new AtomicInteger();
+    /** 配置代次：reload 后自增，用于丢弃"旧配置下发起"的查询结果，避免写回缓存。 */
+    private final AtomicLong generation = new AtomicLong();
     /** 外部查询线程池：只跑叶子网络任务，不做编排。 */
     private final ExecutorService executor;
 
@@ -84,13 +105,21 @@ public final class PremiumService {
         this.executor = newExecutor(resolvers.size());
     }
 
+    /**
+     * 外部查询线程池：线程数按源数取（上限 3 源 × 2），**队列有界**。
+     *
+     * <p>历史实现用 {@link Executors#newFixedThreadPool}（无界队列）：随机昵称批量建连时
+     * 任务可以无限堆积，既吃内存也对上游 API 洪泛。现在改为有界队列 + AbortPolicy，
+     * 拒绝路径由 {@link #startQuery(String)} 转成"立即失败"而不是抛出。
+     */
     private static ExecutorService newExecutor(int resolverCount) {
         int threads = Math.max(3, resolverCount * 2);
-        return Executors.newFixedThreadPool(threads, runnable -> {
-            Thread thread = new Thread(runnable, "MikuAuth-Premium");
-            thread.setDaemon(true);
-            return thread;
-        });
+        return new ThreadPoolExecutor(threads, threads, 0L, TimeUnit.MILLISECONDS,
+                new ArrayBlockingQueue<>(QUEUE_CAPACITY), runnable -> {
+                    Thread thread = new Thread(runnable, "MikuAuth-Premium");
+                    thread.setDaemon(true);
+                    return thread;
+                }, new ThreadPoolExecutor.AbortPolicy());
     }
 
     /** 是否有任何启用的验证源。 */
@@ -105,7 +134,9 @@ public final class PremiumService {
     public synchronized void reload(MikuConfig config) {
         this.resolvers = List.copyOf(buildResolvers(config));
         applyTuning(config);
-        // 验证源开关可能已变化，旧结果不再可信
+        // 验证源开关可能已变化，旧结果不再可信；代次 +1 让"旧配置下发起、reload 之后才回来"
+        // 的查询结果不再写回缓存（否则 reload 清除缓存的效果会被在途结果推翻）
+        generation.incrementAndGet();
         cache.clear();
         if (logger != null) {
             logger.info("[正版验证] 配置已重载：验证源 {} 个，单源超时 {}ms，命中缓存 {}min，未命中缓存 {}min",
@@ -150,23 +181,56 @@ public final class PremiumService {
             cache.remove(key);
         }
 
-        // 2. 单飞合并并发请求
-        CompletableFuture<PremiumResolution> leader = inFlight.get(key);
-        if (leader != null) {
-            return leader;
-        }
-        CompletableFuture<PremiumResolution> future = queryApis(username);
-        CompletableFuture<PremiumResolution> existing = inFlight.putIfAbsent(key, future);
-        if (existing != null) {
-            return existing;
-        }
-        future.whenComplete((result, throwable) -> {
-            inFlight.remove(key);
-            if (throwable == null && result != null) {
-                cacheResult(key, result);
+        // 2. 准入控制：这条路径在 PreLogin 阶段就能被任意昵称触发（不需要先认证），
+        //    没有上限时随机昵称批量建连即可堆积无界任务、并对上游 API 洪泛。
+        //    超过上限一律按 UNKNOWN 处理（fail-closed 下会拒绝），绝不无限排队。
+        if (inFlightCount.get() >= MAX_IN_FLIGHT_QUERIES) {
+            if (logger != null) {
+                logger.warn("[正版验证] 并发查询达到上限 {}（疑似被批量建连刷量），本次按无法判定处理: {}",
+                        MAX_IN_FLIGHT_QUERIES, username);
             }
+            return CompletableFuture.completedFuture(
+                    PremiumResolution.unknown("service", "并发查询过载"));
+        }
+
+        // 3. 单飞合并并发请求：
+        //    必须"先占位、后发起"——先建 future 再 putIfAbsent 会让落败方也已经发出 3 个请求，
+        //    结果却被丢弃（既重复外发，也与"合并为一次查询"的承诺不符）。
+        AtomicBoolean created = new AtomicBoolean();
+        long startedGeneration = generation.get();
+        CompletableFuture<PremiumResolution> future = inFlight.computeIfAbsent(key, ignored -> {
+            created.set(true);
+            return startQuery(username);
         });
+        if (created.get()) {
+            future.whenComplete((result, throwable) -> {
+                inFlight.remove(key);
+                inFlightCount.decrementAndGet();
+                if (throwable == null && result != null && startedGeneration == generation.get()) {
+                    cacheResult(key, result);
+                }
+            });
+        }
         return future;
+    }
+
+    /**
+     * 发起一次外部查询。
+     *
+     * <p>线程池队列满时 {@code runAsync} 会抛 {@link RejectedExecutionException}；
+     * 这里必须转成"异常完成的 future"而不是向上抛 —— 本方法在
+     * {@code computeIfAbsent} 的映射函数里被调用，抛出会让合并表的语义变得难预测。
+     */
+    private CompletableFuture<PremiumResolution> startQuery(String username) {
+        inFlightCount.incrementAndGet();
+        try {
+            return queryApis(username);
+        } catch (RejectedExecutionException e) {
+            inFlightCount.decrementAndGet();
+            CompletableFuture<PremiumResolution> failed = new CompletableFuture<>();
+            failed.completeExceptionally(e);
+            return failed;
+        }
     }
 
     // ---------------------------------------------------------------------
@@ -187,27 +251,41 @@ public final class PremiumService {
 
         ConcurrentHashMap<String, PremiumResolution> results = new ConcurrentHashMap<>(active.size() * 2);
         CompletableFuture<PremiumResolution> firstPremium = new CompletableFuture<>();
+        // 权威源已明确"该昵称不存在"：此时镜像的 PREMIUM 属数据矛盾，必须走仲裁（返回 UNKNOWN），
+        // 不能因为"先到"就采信镜像——否则同一输入会因响应顺序不同而时好时坏
+        AtomicBoolean authoritativeOffline = new AtomicBoolean();
         List<CompletableFuture<Void>> tasks = new ArrayList<>(active.size());
 
         for (PremiumResolver resolver : active) {
             tasks.add(CompletableFuture.runAsync(() -> {
-                PremiumResolution resolution;
                 try {
-                    resolution = resolver.resolve(username);
+                    PremiumResolution resolution;
+                    try {
+                        resolution = resolver.resolve(username);
+                    } catch (Throwable t) {
+                        // 单个源的 Error（类链接失败 / OOM）也必须落成结果，否则汇总永远等不到它
+                        resolution = PremiumResolution.unknown(resolver.id(), t.getClass().getSimpleName());
+                    }
+                    if (AUTHORITATIVE.equals(resolver.id()) && resolution.isOffline()) {
+                        authoritativeOffline.set(true);
+                    }
+                    results.put(resolver.id(), resolution);
+                    if (resolution.isPremium() && !authoritativeOffline.get()
+                            && firstPremium.complete(resolution) && logger != null) {
+                        logger.debug("[正版验证] " + username + " 确认为正版（来源: " + resolver.id() + "）");
+                    }
                 } catch (Throwable t) {
-                    // 单个源的 Error（类链接失败 / OOM）也必须落成结果，否则汇总永远等不到它
-                    resolution = PremiumResolution.unknown(resolver.id(), t.getClass().getSimpleName());
-                }
-                results.put(resolver.id(), resolution);
-                if (resolution.isPremium() && firstPremium.complete(resolution)) {
-                    logger.debug("[正版验证] " + username + " 确认为正版（来源: " + resolver.id() + "）");
+                    // 汇总环节也必须兜底：否则该任务异常完成会让 allOf 异常，
+                    // 整次查询只能等兜底超时（调用方 fail-closed 拒绝）
+                    results.putIfAbsent(resolver.id(),
+                            PremiumResolution.unknown(resolver.id(), "汇总失败"));
                 }
             }, executor));
         }
 
         CompletableFuture<PremiumResolution> allDone = CompletableFuture
                 .allOf(tasks.toArray(new CompletableFuture<?>[0]))
-                .thenApply(ignored -> selectBest(results, username));
+                .thenApply(ignored -> selectBest(active, results, username));
 
         // 任一源确认正版即可提前结束；否则等全部完成做仲裁。最后统一挂兜底超时。
         return allDone.applyToEither(firstPremium, resolution -> resolution)
@@ -215,8 +293,15 @@ public final class PremiumService {
                         Math.max(1, queryTimeoutMillis), TimeUnit.MILLISECONDS);
     }
 
-    /** 决策规则（见类注释）。 */
-    private PremiumResolution selectBest(ConcurrentHashMap<String, PremiumResolution> results, String username) {
+    /**
+     * 决策规则（见类注释）。
+     *
+     * @param active 本次查询实际使用的验证源<b>快照</b>：不能读 {@link #resolvers} 字段，
+     *               否则 reload 与查询并发时会在结果里查不到某个源而莫名返回 UNKNOWN
+     */
+    private PremiumResolution selectBest(List<PremiumResolver> active,
+                                         ConcurrentHashMap<String, PremiumResolution> results,
+                                         String username) {
         PremiumResolution mojang = results.get(AUTHORITATIVE);
         if (mojang != null && mojang.isPremium()) {
             return mojang;
@@ -229,10 +314,12 @@ public final class PremiumService {
                 // 注意：结果里<b>保留镜像给出的 UUID</b> —— 调用方可用它区分
                 // "号主已改名的历史映射"（镜像 UUID == 库中该昵称的 UUID）与真正的抢注。
                 if (mojang != null && mojang.isOffline()) {
-                    logger.warn("[正版验证] " + username + " 各源结果冲突（Mojang=离线，"
-                            + resolution.source() + "=正版），拒绝判定");
+                    if (logger != null) {
+                        logger.warn("[正版验证] " + username + " 各源结果冲突（Mojang=离线，"
+                                + resolution.source() + "=正版），拒绝判定");
+                    }
                     return new PremiumResolution(PremiumResolution.Status.UNKNOWN, resolution.uuid(),
-                            resolution.canonicalName(), "service", "各源结果冲突");
+                            resolution.canonicalName(), "service", "各源结果冲突", false);
                 }
                 return resolution;
             }
@@ -242,9 +329,9 @@ public final class PremiumService {
         if (mojang != null && mojang.isOffline()) {
             return mojang;
         }
-        // 镜像仲裁：所有已启用的镜像源一致 OFFLINE
+        // 镜像仲裁：所有已启用的镜像源一致 OFFLINE（结果标记为非权威，调用方不得据此删库）
         List<PremiumResolution> mirrors = new ArrayList<>(results.size());
-        for (PremiumResolver resolver : resolvers) {
+        for (PremiumResolver resolver : active) {
             if (!resolver.id().equals(AUTHORITATIVE)) {
                 PremiumResolution resolution = results.get(resolver.id());
                 if (resolution == null || !resolution.isOffline()) {
@@ -271,6 +358,12 @@ public final class PremiumService {
             return;
         }
         long ttl = resolution.isPremium() ? hitTtlNanos : missTtlNanos;
+        // 非权威源的 OFFLINE（镜像仲裁结论）同样不缓存：镜像数据可能只是滞后
+        // （玩家刚改名、刚注册），缓存会把误判窗口放大到整个 TTL
+        if (!resolution.isPremium() && !resolution.isAuthoritative()) {
+            cache.remove(key);
+            return;
+        }
         if (ttl <= 0) {
             cache.remove(key);
             return;

@@ -30,8 +30,17 @@ public enum AuditAction {
     REJECT_NAME_SNIPE,
     /** 因同 IP 账号数超限而拒绝。 */
     REJECT_IP_LIMIT,
-    /** 管理员操作（重置/删除密码、撤销会话、解锁等）。 */
+    /** 管理员操作（重置/删除密码、清除正版绑定、解锁、迁移以外的账号改动等）。 */
     ADMIN_ACTION,
     /** 账号迁移。 */
-    MIGRATE
+    MIGRATE,
+    /** 清理陈旧的正版记录并释放昵称（死昵称清理，属破坏性操作，必须留痕）。 */
+    STALE_ACCOUNT_RELEASED,
+    /**
+     * 无法识别的事件类型。
+     *
+     * <p>只在"降级运行读到新版本写入的 action"时出现：展开展示为"未知事件"，
+     * 而不是伪装成"管理员操作"（那会把排障方向带偏）。
+     */
+    UNKNOWN
 }

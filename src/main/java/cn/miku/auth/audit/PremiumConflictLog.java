@@ -93,9 +93,11 @@ public final class PremiumConflictLog {
     public PremiumConflictLog(Path dataDirectory, MikuConfig config, Logger logger) {
         this.logger = logger;
         String configured = config.premiumConflictLogFile();
+        // 同 BackendKickLog：文件名落地前先做越界检查
         this.file = configured == null || configured.isBlank()
                 ? null
-                : dataDirectory.resolve(configured.trim());
+                : cn.miku.auth.util.PathSafety.resolveInside(
+                        dataDirectory, configured, "premium-conflicts.log", logger);
         this.writer = new ThreadPoolExecutor(1, 1, 0L, TimeUnit.MILLISECONDS,
                 new LinkedBlockingQueue<>(QUEUE_CAPACITY),
                 runnable -> {

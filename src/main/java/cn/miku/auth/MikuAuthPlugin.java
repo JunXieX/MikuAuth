@@ -56,7 +56,7 @@ import java.time.Duration;
         id = "mikuauth",
         name = "MikuAuth",
         version = MikuAuthPlugin.VERSION,
-        description = "Velocity 登录验证插件：正版多源免密 / 基岩版免密 / Dialog 菜单 / 同 IP 会话免密 / SQLite + MariaDB",
+        description = "Velocity 登录验证插件：正版多源免密 / 基岩版免密 / Dialog 对话框登录 / 同 IP 会话免密 / SQLite + MariaDB",
         authors = {"JunXieX"},
         dependencies = {
                 // 强依赖：packetevents-velocity 缺失时 Velocity 不会加载本插件
@@ -73,7 +73,7 @@ public final class MikuAuthPlugin {
      * 插件版本：唯一的版本号来源（{@code pom.xml} 需同步修改）。
      * 同时用于 {@code @Plugin} 注解与对外请求的 User-Agent，避免多处硬编码走样。
      */
-    public static final String VERSION = "2.5.0";
+    public static final String VERSION = "2.6.0";
 
     private final ProxyServer server;
     private final Logger logger;
@@ -93,6 +93,8 @@ public final class MikuAuthPlugin {
     private BackendKickLog backendKickLog;
     /** 账号迁移器。 */
     private AccountMigrator migrator;
+    /** 审计记录器：认证流程、迁移器与管理命令的写操作共用同一个实例。 */
+    private AuditLogger auditLogger;
     private boolean packetListenerRegistered;
     /** 初始化失败或强依赖缺失时置位：此时不注册任何监听、命令与任务。 */
     private volatile boolean disabled;
@@ -185,8 +187,8 @@ public final class MikuAuthPlugin {
         premiumService = new PremiumService(config, logger);
         dialogService = new DialogService(config, messages, logger);
         display = new DisplayManager(config, messages);
-        // 审计记录器：认证流程与迁移器共用同一个实例
-        AuditLogger auditLogger = new AuditLogger(database, config, logger);
+        // 审计记录器：认证流程、迁移器与管理命令的写操作共用同一个实例
+        auditLogger = new AuditLogger(database, config, logger);
         // 昵称冲突记录文件（记录"同名冲突被顶下线"；会话校验失败的连接不产生事件，不会写到这里）
         conflictLog = new PremiumConflictLog(dataDirectory, config, logger);
         // 后端拒绝进入记录文件（目标服给出的踢出原因；同一原因也会转发到玩家聊天栏）
@@ -383,6 +385,16 @@ public final class MikuAuthPlugin {
     /** 账号迁移器（供 /mikuauth migrate 使用）。 */
     public AccountMigrator migrator() {
         return migrator;
+    }
+
+    /** 审计记录器（管理命令的写操作需要留痕）。 */
+    public AuditLogger audit() {
+        return auditLogger;
+    }
+
+    /** 插件日志（命令层记录被吞掉的异步失败时用）。 */
+    public Logger logger() {
+        return logger;
     }
 
     /** 渲染管理命令的多行文本（支持 MiniMessage 与 {占位符}）。 */

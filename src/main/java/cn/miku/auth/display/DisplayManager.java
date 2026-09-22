@@ -35,6 +35,16 @@ public final class DisplayManager {
     private final ConcurrentHashMap<UUID, TrackedDisplay> tracked = new ConcurrentHashMap<>();
 
     /**
+     * 处于静默态的玩家（Dialog 打开中）。
+     *
+     * <p><b>为什么不复用 {@link TrackedDisplay#silent}</b>：跟踪条目只在显示开关打开时创建
+     * （{@code display.title} 与 {@code display.bossbar} 全关时 {@code tracked} 为空），
+     * 而"对话框期间不发聊天提示"是独立需求 —— 复用会让该规则在这类服务器上整体失效，
+     * 玩家会在对话框关闭后看到一堆本应被抑制的错误/用法提示。
+     */
+    private final java.util.Set<UUID> silentPlayers = ConcurrentHashMap.newKeySet();
+
+    /**
      * 单个玩家的显示状态。
      *
      * <p><b>线程模型</b>：{@code silent} 由事件线程写（{@code enterSilent}/{@code exitSilent}），
@@ -104,8 +114,11 @@ public final class DisplayManager {
 
     /** 进入静默：Dialog 对话框打开，隐藏 Title 与 BossBar，暂停一切提示更新。 */
     public void enterSilent(Player player) {
+        silentPlayers.add(player.getUniqueId());
         TrackedDisplay display = tracked.get(player.getUniqueId());
         if (display == null || display.silent) {
+            // display == null：显示开关全关，没有跟踪条目；但静默状态已在上面记下，
+            // 对话框期间的聊天提示仍会被抑制
             return;
         }
         display.silent = true;
@@ -115,6 +128,7 @@ public final class DisplayManager {
 
     /** 退出静默：对话框已关闭或不可用，立即恢复全部提示。 */
     public void exitSilent(Player player) {
+        silentPlayers.remove(player.getUniqueId());
         TrackedDisplay display = tracked.get(player.getUniqueId());
         if (display == null || !display.silent) {
             return;
@@ -128,8 +142,7 @@ public final class DisplayManager {
 
     /** 是否处于静默状态（Dialog 打开中）。 */
     public boolean isSilent(UUID playerId) {
-        TrackedDisplay display = tracked.get(playerId);
-        return display != null && display.silent;
+        return silentPlayers.contains(playerId);
     }
 
     /** 显示认证成功 Title 并结束跟踪（静默状态下由调用方决定何时展示）。 */
@@ -146,11 +159,26 @@ public final class DisplayManager {
 
     /** 结束跟踪并清理显示。 */
     public void stopTracking(Player player) {
-        TrackedDisplay display = tracked.remove(player.getUniqueId());
+        UUID playerId = player.getUniqueId();
+        silentPlayers.remove(playerId);
+        TrackedDisplay display = tracked.remove(playerId);
         if (display != null) {
             player.hideBossBar(display.bossBar);
             player.clearTitle();
         }
+    }
+
+    /**
+     * 结束跟踪（按 UUID）。
+     *
+     * <p><b>断线路径必须用它</b>：Velocity 触发 {@code DisconnectEvent} 时玩家已经不在代理的
+     * 注册表里（拿不到 {@code Player} 对象），旧实现只有 {@code stopTracking(Player)}，
+     * 于是"待认证期间断线"的玩家条目永久留在跟踪表里 —— BossBar 与占位符 Map 随
+     * 不同玩家数单调增长。连接已断，客户端侧无需再 hide，只需把条目移除。
+     */
+    public void stopTracking(UUID playerId) {
+        silentPlayers.remove(playerId);
+        tracked.remove(playerId);
     }
 
     // ---------------------------------------------------------------------
@@ -170,7 +198,7 @@ public final class DisplayManager {
     }
 
     // ---------------------------------------------------------------------
-    // 心跳：每秒由主类对每个在线玩家调用
+    // 心跳：每秒由 AuthManager.tick() 对"待认证玩家"调用（不是全部在线玩家）
     // ---------------------------------------------------------------------
 
     /** 更新 BossBar 倒计时文本与进度，并周期性重发 Title。静默期间跳过。 */

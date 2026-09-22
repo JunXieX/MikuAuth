@@ -51,7 +51,8 @@ class ConfigAndMessagesTest {
             "dialog.register.close-button", "dialog.register.close-button-tooltip",
             // AuthManager 的失败反馈（errorKey 以变量传入）
             "error.already-authed", "error.please-register", "error.please-login",
-            "error.password-empty", "error.password-length", "error.password-mismatch",
+            "error.password-empty", "error.password-length", "error.password-too-long",
+            "error.password-mismatch",
             "error.password-wrong", "error.password-invalid-chars", "error.password-wrong-conflict",
             "error.password-same", "error.old-password-wrong", "error.password-wrong-locked",
             "error.not-registered", "error.already-registered", "error.ip-limit",

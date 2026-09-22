@@ -36,6 +36,9 @@ import org.slf4j.Logger;
  *   <li><b>只增不改</b>：绝不修改、删除或重排任何已有行；</li>
  *   <li>用户文件不是合法 YAML 时<b>完全不碰</b>（看不懂的文件不动）；</li>
  *   <li>写入前先校验合并结果能解析、且新增键确实能被读到，否则<b>放弃写入</b>；</li>
+ *   <li>写入前还要再查一次<b>重复键</b>——重复键会让后写入的模板默认值覆盖用户设置，
+ *       是"只增不改"在语义层面被破坏的唯一途径；</li>
+ *   <li>键路径的推导只依赖<b>真实缩进栈</b>，与缩进宽度无关（2 空格 / 4 空格 / 制表符都正确）；</li>
  *   <li>首次修改前留一份 {@code <文件名>.bak}；</li>
  *   <li>整个过程幂等：第二次启动不会重复插入。</li>
  * </ul>
@@ -133,15 +136,26 @@ final class ConfigUpdater {
                 continue;
             }
             int index;
+            int indentShift;
             if (parent.isEmpty()) {
                 index = userLines.size();
+                indentShift = 0;
             } else {
                 index = bodyEnd(userLines, parent);
                 if (index < 0) {
                     continue;
                 }
+                // 模板块要按"用户文件自己的缩进风格"平移后再插入：
+                // 模板用 2 空格、用户被编辑器重排成 4 空格时，直接把块插进去会让新键的缩进
+                // 比同级键更浅 —— 那不是排版不整齐，而是**非法 YAML**（解析直接失败，
+                // 合并被安全闸门放弃，用户永远看不到新配置项）
+                int[] parentLocation = locateKey(userLines, parent);
+                indentShift = parentLocation[0] < 0
+                        ? 0
+                        : childIndent(userLines, parent, parentLocation[1]) - entry.indent();
             }
-            grouped.computeIfAbsent(index, ignored -> new ArrayList<>()).addAll(entry.block());
+            grouped.computeIfAbsent(index, ignored -> new ArrayList<>())
+                    .addAll(shift(entry.block(), indentShift));
             topLevelAt.merge(index, parent.isEmpty(), (a, b) -> a || b);
             added.add(entry.path());
         }
@@ -174,11 +188,23 @@ final class ConfigUpdater {
         }
 
         String merged = String.join(eol, userLines);
-        // 安全闸门：合并结果必须可解析，且新增的每个键都真的能被读到
+        // 安全闸门：合并结果必须可解析、且新增的每个键都真的能被读到
         Map<String, Object> parsed = tryParse(merged);
         if (parsed == null || !containsAll(parsed, added)) {
             if (logger != null) {
                 logger.warn("[配置] {} 的增量合并结果未通过校验，已放弃写入", file.getFileName());
+            }
+            return Result.NONE;
+        }
+        // 第二道闸门：合并结果不得含重复键。
+        // 只靠上面的 containsAll 挡不住"同一个键出现两次"——SnakeYAML 默认允许重复键且
+        // **后者胜**，那等于把模板默认值追加到用户写的值后面，静默改掉用户显式设置
+        // （实测：用户写 "enabled": false，合并后被默认值 true 覆盖）。
+        if (hasDuplicateKeys(merged)) {
+            if (logger != null) {
+                logger.warn("[配置] {} 的增量合并会产生重复键（会让默认值覆盖你的设置），已放弃写入。"
+                        + "请检查该文件是否使用了带引号的键名（如 \"key\":）或非标准缩进",
+                        file.getFileName());
             }
             return Result.NONE;
         }
@@ -187,10 +213,10 @@ final class ConfigUpdater {
         if (Files.notExists(backup)) {
             Files.copy(file, backup);
         }
-        Files.writeString(file, merged, StandardCharsets.UTF_8);
+        writeAtomically(file, merged);
         if (logger != null) {
             if (!added.isEmpty()) {
-                logger.info("[配置] {} 已补充新增配置项: {}（原文件备份为 {}）",
+                logger.info("[配置] {} 已补充新增配置项: {}（首次修改前的备份：{}）",
                         file.getFileName(), String.join(", ", added), backup.getFileName());
             }
             if (!retiredNoted.isEmpty()) {
@@ -199,6 +225,24 @@ final class ConfigUpdater {
             }
         }
         return new Result(added, true);
+    }
+
+    /**
+     * 原子写入：先写同目录临时文件再改名覆盖。
+     *
+     * <p>直接覆盖写有个真实的坏结果——写到一半进程被杀（或磁盘满）会把服主的配置
+     * 截断成半个文件，而此时"原文件备份"只存在于<b>首次</b>修改之前。
+     */
+    private static void writeAtomically(Path file, String content) throws IOException {
+        Path temp = file.resolveSibling(file.getFileName() + ".tmp");
+        Files.writeString(temp, content, StandardCharsets.UTF_8);
+        try {
+            Files.move(temp, file, java.nio.file.StandardCopyOption.REPLACE_EXISTING,
+                    java.nio.file.StandardCopyOption.ATOMIC_MOVE);
+        } catch (IOException atomicUnsupported) {
+            // 个别文件系统不支持原子改名：退回普通覆盖，但仍避免"写到一半"
+            Files.move(temp, file, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+        }
     }
 
     // ---------------------------------------------------------------------
@@ -244,23 +288,50 @@ final class ConfigUpdater {
      * @return {行号, 缩进}；行号为 -1 表示该路径不存在
      */
     private static int[] locateKey(List<String> lines, String path) {
-        Deque<String> stack = new ArrayDeque<>();
+        for (KeyHit hit : keyHits(lines)) {
+            if (path.equals(hit.path())) {
+                return new int[]{hit.lineIndex(), hit.indent()};
+            }
+        }
+        return new int[]{-1, 0};
+    }
+
+    /** 一行键：行号、缩进（绝对空格数）、由缩进栈推导出的完整路径。 */
+    private record KeyHit(int lineIndex, int indent, String path) {
+    }
+
+    /**
+     * 扫描键行并推导完整键路径。
+     *
+     * <p><b>为什么不用「缩进 ÷ 2」</b>：那等于假定每级恰好缩进 2 个空格。服主用编辑器
+     * 重排成 4 空格缩进、或把文件交给格式化工具后，同一级的键会被串成子级，键路径整体错位
+     * （实测：4 空格文件里 `server.auth-server` 的兄弟键被算成 `server.auth-server.fallback-server`），
+     * 于是合并结果通不过安全校验 —— 该用户的新配置项<b>永远补不进去</b>。
+     *
+     * <p>这里的规则与 YAML 一致：只比较<b>绝对缩进值</b>，弹出所有"缩进 ≥ 当前行"的层级，
+     * 与缩进宽度（2 空格 / 4 空格 / 制表符）无关。
+     */
+    private static List<KeyHit> keyHits(List<String> lines) {
+        List<KeyHit> hits = new ArrayList<>();
+        Deque<Integer> indents = new ArrayDeque<>();
+        Deque<String> keys = new ArrayDeque<>();
         for (int i = 0; i < lines.size(); i++) {
             Matcher matcher = KEY_LINE.matcher(lines.get(i));
             if (!matcher.matches()) {
                 continue;
             }
             int indent = matcher.group(1).length();
-            int depth = indent / 2;
-            while (stack.size() > depth) {
-                stack.pollLast();
+            while (!indents.isEmpty() && indent <= indents.peekLast()) {
+                indents.pollLast();
+                keys.pollLast();
             }
-            stack.addLast(matcher.group(2));
-            if (path.equals(String.join(".", stack))) {
-                return new int[]{i, indent};
-            }
+            String key = matcher.group(2);
+            hits.add(new KeyHit(i, indent,
+                    keys.isEmpty() ? key : String.join(".", keys) + "." + key));
+            indents.addLast(indent);
+            keys.addLast(key);
         }
-        return new int[]{-1, 0};
+        return hits;
     }
 
     // ---------------------------------------------------------------------
@@ -284,30 +355,15 @@ final class ConfigUpdater {
      */
     private static Map<String, Entry> collectEntries(List<String> lines) {
         Map<String, Entry> entries = new LinkedHashMap<>();
-        List<int[]> keyLines = new ArrayList<>();          // [行号, 缩进, 深度]
-        List<String> paths = new ArrayList<>();
-        Deque<String> stack = new ArrayDeque<>();
-        for (int i = 0; i < lines.size(); i++) {
-            Matcher matcher = KEY_LINE.matcher(lines.get(i));
-            if (!matcher.matches()) {
-                continue;
-            }
-            int indent = matcher.group(1).length();
-            int depth = indent / 2;
-            while (stack.size() > depth) {
-                stack.pollLast();
-            }
-            stack.addLast(matcher.group(2));
-            keyLines.add(new int[]{i, indent, depth});
-            paths.add(String.join(".", stack));
-        }
+        List<KeyHit> keyLines = keyHits(lines);
         for (int k = 0; k < keyLines.size(); k++) {
-            int index = keyLines.get(k)[0];
-            int indent = keyLines.get(k)[1];
+            KeyHit hit = keyLines.get(k);
+            int index = hit.lineIndex();
+            int indent = hit.indent();
             int end = lines.size();
             for (int j = k + 1; j < keyLines.size(); j++) {
-                if (keyLines.get(j)[1] <= indent) {
-                    end = keyLines.get(j)[0];
+                if (keyLines.get(j).indent() <= indent) {
+                    end = keyLines.get(j).lineIndex();
                     break;
                 }
             }
@@ -320,27 +376,57 @@ final class ConfigUpdater {
             while (start > 0 && isBlankOrComment(lines.get(start - 1))) {
                 start--;
             }
-            entries.put(paths.get(k), new Entry(paths.get(k), indent,
+            entries.put(hit.path(), new Entry(hit.path(), indent,
                     new ArrayList<>(lines.subList(start, end))));
         }
         return entries;
     }
 
+    /**
+     * 用户文件里某段落的"子项缩进"：该段落第一层子键的缩进。
+     *
+     * <p>用来把模板块平移到与用户文件一致的缩进风格（见 {@code doMerge} 里的说明）。
+     * 该段落还没有任何子项时，退化为"父键缩进 + 2"（内置模板的风格）。
+     */
+    private static int childIndent(List<String> lines, String parentPath, int parentIndent) {
+        boolean foundParent = false;
+        for (KeyHit hit : keyHits(lines)) {
+            if (!foundParent) {
+                foundParent = parentPath.equals(hit.path());
+                continue;
+            }
+            return hit.indent() > parentIndent ? hit.indent() : parentIndent + 2;
+        }
+        return parentIndent + 2;
+    }
+
+    /** 按 delta 个空格整体平移一个块（正数缩进、负数回退），空行与注释的相对位置保持不变。 */
+    private static List<String> shift(List<String> block, int delta) {
+        if (delta == 0) {
+            return block;
+        }
+        List<String> shifted = new ArrayList<>(block.size());
+        for (String line : block) {
+            if (line.isBlank()) {
+                shifted.add(line);
+                continue;
+            }
+            if (delta > 0) {
+                shifted.add(" ".repeat(delta) + line);
+            } else {
+                int leading = line.length() - line.stripLeading().length();
+                int strip = Math.min(-delta, leading);
+                shifted.add(strip > 0 ? line.substring(strip) : line);
+            }
+        }
+        return shifted;
+    }
+
     /** 收集用户文件里所有层级的键路径。 */
     private static Set<String> collectPaths(List<String> lines) {
         Set<String> paths = new LinkedHashSet<>();
-        Deque<String> stack = new ArrayDeque<>();
-        for (String line : lines) {
-            Matcher matcher = KEY_LINE.matcher(line);
-            if (!matcher.matches()) {
-                continue;
-            }
-            int depth = matcher.group(1).length() / 2;
-            while (stack.size() > depth) {
-                stack.pollLast();
-            }
-            stack.addLast(matcher.group(2));
-            paths.add(String.join(".", stack));
+        for (KeyHit hit : keyHits(lines)) {
+            paths.add(hit.path());
         }
         return paths;
     }
@@ -355,21 +441,10 @@ final class ConfigUpdater {
     private static int bodyEnd(List<String> lines, String parentPath) {
         int keyIndex = -1;
         int keyIndent = 0;
-        Deque<String> stack = new ArrayDeque<>();
-        for (int i = 0; i < lines.size(); i++) {
-            Matcher matcher = KEY_LINE.matcher(lines.get(i));
-            if (!matcher.matches()) {
-                continue;
-            }
-            int indent = matcher.group(1).length();
-            int depth = indent / 2;
-            while (stack.size() > depth) {
-                stack.pollLast();
-            }
-            stack.addLast(matcher.group(2));
-            if (parentPath.equals(String.join(".", stack))) {
-                keyIndex = i;
-                keyIndent = indent;
+        for (KeyHit hit : keyHits(lines)) {
+            if (parentPath.equals(hit.path())) {
+                keyIndex = hit.lineIndex();
+                keyIndent = hit.indent();
                 break;
             }
         }
@@ -432,6 +507,24 @@ final class ConfigUpdater {
             return map;
         } catch (RuntimeException e) {
             return null;
+        }
+    }
+
+    /**
+     * 合并结果是否含重复键。
+     *
+     * <p>SnakeYAML 默认允许重复键（<b>后者胜</b>），而重复键几乎只可能来自"把整段模板重复追加"
+     * ——那会让模板默认值盖掉用户自己的设置。因此用「禁止重复键」重新解析一次作为第二道闸门：
+     * 解析失败即放弃写入（宁可少补几个新选项，也不能静默改用户的配置）。
+     */
+    private static boolean hasDuplicateKeys(String text) {
+        LoaderOptions options = new LoaderOptions();
+        options.setAllowDuplicateKeys(false);
+        try {
+            new Yaml(new SafeConstructor(options)).load(text);
+            return false;
+        } catch (RuntimeException e) {
+            return true;
         }
     }
 

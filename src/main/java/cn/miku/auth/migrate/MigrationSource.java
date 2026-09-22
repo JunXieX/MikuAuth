@@ -16,24 +16,18 @@ package cn.miku.auth.migrate;
  */
 public enum MigrationSource {
 
-    AUTHME("AuthMe", "authme"),
-    LIBRELOGIN("LibreLogin", "librepremium_data"),
-    LIMBOAUTH("LimboAuth", "AUTH");
+    AUTHME("AuthMe"),
+    LIBRELOGIN("LibreLogin"),
+    LIMBOAUTH("LimboAuth");
 
     private final String displayName;
-    private final String tableName;
 
-    MigrationSource(String displayName, String tableName) {
+    MigrationSource(String displayName) {
         this.displayName = displayName;
-        this.tableName = tableName;
     }
 
     public String displayName() {
         return displayName;
-    }
-
-    public String tableName() {
-        return tableName;
     }
 
     /** 解析用户输入（大小写不敏感，接受常见别名）。 */

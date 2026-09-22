@@ -57,6 +57,17 @@ interface SqlBackend extends AutoCloseable {
     String upsertSessionSql();
 
     /**
+     * 分批清理过期会话的语句（两个占位符：截止时间、单批行数）。
+     *
+     * <p>一次性 {@code DELETE} 掉全部历史行会独占唯一的 SQLite 工作线程，
+     * 期间登录/注册任务全在排队。分批让出线程，把影响摊平。
+     */
+    String purgeSessionsSql();
+
+    /** 分批清理过期审计日志的语句（两个占位符：截止时间、单批行数）。 */
+    String purgeAuditSql();
+
+    /**
      * 审计日志表建表语句。
      * 与账号表同理：结构定义放在后端，保证两种方言各自正确
      * （MariaDB 的自增列、索引语法与 SQLite 不同）。

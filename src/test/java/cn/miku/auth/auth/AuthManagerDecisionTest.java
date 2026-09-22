@@ -87,7 +87,7 @@ class AuthManagerDecisionTest {
     @Test
     void sameIpSessionMarksDirectEntry() {
         repository.player = Optional.of(offlineAccount("alice", "hash"));
-        repository.session = Optional.of(new DatabaseManager.Session("alice", "1.2.3.4", Long.MAX_VALUE));
+        repository.session = Optional.of(new DatabaseManager.Session("1.2.3.4", Long.MAX_VALUE));
 
         AuthManager.ModeDecision decision = authManager.decideLoginModeAsync("alice", "1.2.3.4").join();
 
@@ -99,7 +99,7 @@ class AuthManagerDecisionTest {
     @Test
     void differentIpSessionRequiresPassword() {
         repository.player = Optional.of(offlineAccount("alice", "hash"));
-        repository.session = Optional.of(new DatabaseManager.Session("alice", "9.9.9.9", Long.MAX_VALUE));
+        repository.session = Optional.of(new DatabaseManager.Session("9.9.9.9", Long.MAX_VALUE));
 
         authManager.decideLoginModeAsync("alice", "1.2.3.4").join();
 
@@ -122,7 +122,7 @@ class AuthManagerDecisionTest {
         config = loadConfig(false);
         authManager = newAuthManager();
         repository.player = Optional.of(offlineAccount("alice", "hash"));
-        repository.session = Optional.of(new DatabaseManager.Session("alice", "1.2.3.4", Long.MAX_VALUE));
+        repository.session = Optional.of(new DatabaseManager.Session("1.2.3.4", Long.MAX_VALUE));
 
         authManager.decideLoginModeAsync("alice", "1.2.3.4").join();
 
@@ -132,7 +132,7 @@ class AuthManagerDecisionTest {
     @Test
     void nullIpSkipsSessionCheckWithoutError() {
         repository.player = Optional.of(offlineAccount("alice", "hash"));
-        repository.session = Optional.of(new DatabaseManager.Session("alice", "1.2.3.4", Long.MAX_VALUE));
+        repository.session = Optional.of(new DatabaseManager.Session("1.2.3.4", Long.MAX_VALUE));
 
         AuthManager.ModeDecision decision = authManager.decideLoginModeAsync("alice", null).join();
 
@@ -143,7 +143,7 @@ class AuthManagerDecisionTest {
     @Test
     void sessionMarkIsCaseInsensitiveAndConsumable() {
         repository.player = Optional.of(offlineAccount("Alice", "hash"));
-        repository.session = Optional.of(new DatabaseManager.Session("alice", "1.2.3.4", Long.MAX_VALUE));
+        repository.session = Optional.of(new DatabaseManager.Session("1.2.3.4", Long.MAX_VALUE));
 
         authManager.decideLoginModeAsync("Alice", "1.2.3.4").join();
 
@@ -185,7 +185,7 @@ class AuthManagerDecisionTest {
         // 正版玩家自动登记出来的记录没有密码 → 视为未注册（走注册流程）
         repository.player = Optional.of(new StoredPlayer(UUID.randomUUID(), "alice", "alice", null,
                 StoredPlayer.TYPE_OFFLINE, "1.2.3.4", 0L, "1.2.3.4", 0L));
-        repository.session = Optional.of(new DatabaseManager.Session("alice", "1.2.3.4", Long.MAX_VALUE));
+        repository.session = Optional.of(new DatabaseManager.Session("1.2.3.4", Long.MAX_VALUE));
 
         authManager.decideLoginModeAsync("alice", "1.2.3.4").join();
 
@@ -202,7 +202,7 @@ class AuthManagerDecisionTest {
         config = loadConfig(true, true);
         authManager = newAuthManager();
         repository.player = Optional.of(offlineAccount("alice", "hash"));
-        repository.session = Optional.of(new DatabaseManager.Session("alice", "1.2.3.4", Long.MAX_VALUE));
+        repository.session = Optional.of(new DatabaseManager.Session("1.2.3.4", Long.MAX_VALUE));
 
         authManager.decideLoginModeAsync("alice", "1.2.3.4").join();
         authManager.handleConnected(playerFor("alice"));
@@ -219,7 +219,7 @@ class AuthManagerDecisionTest {
         config = loadConfig(true, false);
         authManager = newAuthManager();
         repository.player = Optional.of(offlineAccount("alice", "hash"));
-        repository.session = Optional.of(new DatabaseManager.Session("alice", "1.2.3.4", Long.MAX_VALUE));
+        repository.session = Optional.of(new DatabaseManager.Session("1.2.3.4", Long.MAX_VALUE));
 
         authManager.decideLoginModeAsync("alice", "1.2.3.4").join();
         authManager.handleConnected(playerFor("alice"));
@@ -231,7 +231,7 @@ class AuthManagerDecisionTest {
     @Test
     void sessionMarkIsConsumedAfterSuccessfulEntry() {
         repository.player = Optional.of(offlineAccount("alice", "hash"));
-        repository.session = Optional.of(new DatabaseManager.Session("alice", "1.2.3.4", Long.MAX_VALUE));
+        repository.session = Optional.of(new DatabaseManager.Session("1.2.3.4", Long.MAX_VALUE));
 
         authManager.decideLoginModeAsync("alice", "1.2.3.4").join();
         authManager.handleConnected(playerFor("alice"));
@@ -284,7 +284,7 @@ class AuthManagerDecisionTest {
     void changePasswordAcceptsMigratedLegacyHash() {
         repository.player = Optional.of(offlineAccount("alice", AUTHME_HASH_PANTOF));
         repository.session = Optional.of(
-                new DatabaseManager.Session("alice", "1.2.3.4", Long.MAX_VALUE));
+                new DatabaseManager.Session("1.2.3.4", Long.MAX_VALUE));
 
         Player player = playerFor("alice");
         // 会话免密进入：该连接随即处于"已认证"状态，满足 /changepassword 的前置条件
@@ -599,6 +599,14 @@ class AuthManagerDecisionTest {
         }
 
         @Override
+        public CompletableFuture<DatabaseManager.RegisterResult> registerWithIpLimit(
+                UUID uuid, String nickname, String passwordHash, String authType, String ip,
+                int maxAccounts) {
+            // 配额检查在真实实现里与写入同事务；这里配额不限，直接复用注册路径
+            return register(uuid, nickname, passwordHash, authType, ip);
+        }
+
+        @Override
         public CompletableFuture<Boolean> renameAccount(UUID uuid, String newNickname) {
             return CompletableFuture.completedFuture(false);
         }
@@ -625,7 +633,10 @@ class AuthManagerDecisionTest {
         }
 
         @Override
-        public CompletableFuture<Void> recordLogin(String nickname, String ip) {
+        public CompletableFuture<Void> finishLogin(String nickname, String ip, long expiresAtMillis) {
+            // 认证收尾已合并为一次调用：会话到期时间从这里记录（原 saveSession 的职责），
+            // 免密路径传 0（不续期）
+            lastSavedSessionExpiry = expiresAtMillis;
             return CompletableFuture.completedFuture(null);
         }
 

@@ -34,6 +34,17 @@ public interface AuthRepository {
     CompletableFuture<DatabaseManager.RegisterResult> register(
             UUID uuid, String nickname, String passwordHash, String authType, String ip);
 
+    /**
+     * 注册新账号，并在<b>同一次任务</b>内检查"同 IP 离线账号数"配额。
+     *
+     * <p>与 {@link #register} 分开是为了让"判定 + 写入"在同一时刻完成：
+     * 分成"先 countAccountsByIp 再 register"两步时，同 IP 并发注册可以双双通过检查。
+     *
+     * @param maxAccounts ≤0 表示不限制
+     */
+    CompletableFuture<DatabaseManager.RegisterResult> registerWithIpLimit(
+            UUID uuid, String nickname, String passwordHash, String authType, String ip, int maxAccounts);
+
     /** 把某 UUID 的账号迁移到新昵称（正版改名）。 */
     CompletableFuture<Boolean> renameAccount(UUID uuid, String newNickname);
 
@@ -49,8 +60,12 @@ public interface AuthRepository {
     /** 清除正版绑定，把账号降级为离线账号。 */
     CompletableFuture<Boolean> clearPremiumBinding(String nickname);
 
-    /** 记录一次成功登录。 */
-    CompletableFuture<Void> recordLogin(String nickname, String ip);
+    /**
+     * 认证成功时的一次性收尾：刷新同 IP 会话 + 记录最近登录。
+     *
+     * @param expiresAtMillis ≤0 表示本次不写会话（会话免密关闭时）
+     */
+    CompletableFuture<Void> finishLogin(String nickname, String ip, long expiresAtMillis);
 
     /** 统计某 IP 名下的离线账号数量（配额检查）。 */
     CompletableFuture<Integer> countAccountsByIp(String ip);

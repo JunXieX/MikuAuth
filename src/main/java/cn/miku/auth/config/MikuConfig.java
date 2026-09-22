@@ -4,6 +4,7 @@ import java.io.IOException;
 import java.nio.file.Path;
 import java.util.List;
 import java.util.Locale;
+import java.util.Set;
 import org.slf4j.Logger;
 
 /**
@@ -45,6 +46,7 @@ public final class MikuConfig {
                     logger.warn("[MikuAuth] 配置缺少顶层段落 '{}'，已使用内置默认值。", key);
                 }
             }
+            validateAndWarn(logger);
         }
         // 别名在加载后解析一次并缓存（命令注册与命令拦截共用，必须保持一致）
         this.loginAliases = getStringList("commands.login-aliases", List.of("l", "log"));
@@ -347,6 +349,33 @@ public final class MikuConfig {
             case "trust", "verify-ca", "verify-full" -> mode;
             default -> "disable";
         };
+    }
+
+    /**
+     * 校验"取值带枚举语义"的配置项，非法值一律告警。
+     *
+     * <p>这些项在取值时是<b>静默回退默认值</b>的（例如 {@code ssl-mode} 拼错即回退 disable）。
+     * 静默本身无害，但服主不知道"自己写错了、实际跑的是默认值"——而 ssl-mode 回退成
+     * disable 意味着跨公网明文连接，属于和安全有关的静默降级。
+     */
+    private void validateAndWarn(Logger logger) {
+        String sslMode = getString("database.mariadb.ssl-mode", "disable").trim().toLowerCase(Locale.ROOT);
+        if (!Set.of("disable", "trust", "verify-ca", "verify-full").contains(sslMode)) {
+            logger.warn("[配置] database.mariadb.ssl-mode '{}' 不是合法值，已按 disable 处理"
+                    + "（可选：disable / trust / verify-ca / verify-full）", sslMode);
+        }
+        warnIfUnknownEnum(logger, "display.bossbar-color", bossBarColor(),
+                Set.of("pink", "blue", "red", "green", "yellow", "purple", "white"));
+        warnIfUnknownEnum(logger, "display.bossbar-overlay", bossBarOverlay(),
+                Set.of("progress", "notched_6", "notched_10", "notched_12", "notched_20"));
+    }
+
+    /** 取值不在允许集合内时告警（解析侧仍按默认值继续）。 */
+    private static void warnIfUnknownEnum(Logger logger, String path, String value, Set<String> allowed) {
+        if (logger != null && value != null && !allowed.contains(value.trim().toLowerCase(Locale.ROOT))) {
+            logger.warn("[配置] {} '{}' 不是合法值，已使用默认值（可选：{}）",
+                    path, value, String.join(" / ", allowed));
+        }
     }
 
     // ---------------------------------------------------------------------

@@ -78,9 +78,4 @@ public final class MikuMessages {
                 .append(component(key, placeholders))
                 .build();
     }
-
-    /** 渲染并追加聊天前缀（无占位符）。 */
-    public Component prefixed(String key) {
-        return prefixed(key, Map.of());
-    }
 }

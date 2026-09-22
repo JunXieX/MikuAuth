@@ -29,16 +29,47 @@ public final class UuidUtil {
         return UuidUtils.generateOfflinePlayerUuid(username);
     }
 
-    /** 解析存储的 UUID 字符串；null/空/非法一律返回 null。 */
+    /**
+     * 解析存储的 UUID 字符串；null/空/非法一律返回 null。
+     *
+     * <p><b>不接受"宽松写法"</b>：JDK 的 {@code UUID.fromString} 是宽松实现，
+     * {@code "1-2-3-4-5"} 也会返回一个合法但错误的 UUID。这里解析后回比一次规范形式，
+     * 只有「标准 36 位带连字符」或「Mojang 的 32 位十六进制」才认，其余返回 null ——
+     * 迁移外部旧库时，畸形值必须被当成"无效"而不是静默变成一个错误身份键。
+     */
     public static UUID parse(String text) {
         if (text == null || text.isBlank()) {
             return null;
         }
+        String trimmed = text.trim();
+        if (trimmed.length() == 32 && trimmed.indexOf('-') < 0 && isHex(trimmed)) {
+            // Mojang 原始格式：补上连字符
+            String dashed = trimmed.substring(0, 8) + "-" + trimmed.substring(8, 12) + "-"
+                    + trimmed.substring(12, 16) + "-" + trimmed.substring(16, 20) + "-"
+                    + trimmed.substring(20);
+            return parseCanonical(dashed);
+        }
+        return parseCanonical(trimmed);
+    }
+
+    private static UUID parseCanonical(String text) {
         try {
-            return UUID.fromString(text.trim());
+            UUID parsed = UUID.fromString(text);
+            return parsed.toString().equalsIgnoreCase(text) ? parsed : null;
         } catch (IllegalArgumentException e) {
             return null;
         }
+    }
+
+    private static boolean isHex(String text) {
+        for (int i = 0; i < text.length(); i++) {
+            char c = text.charAt(i);
+            boolean hex = (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F');
+            if (!hex) {
+                return false;
+            }
+        }
+        return true;
     }
 
     /** 统一的存储格式：小写带连字符（{@link UUID#toString()} 即此格式）。 */
