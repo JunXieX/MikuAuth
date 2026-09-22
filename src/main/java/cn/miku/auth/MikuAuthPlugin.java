@@ -11,6 +11,7 @@ import cn.miku.auth.command.RegisterCommand;
 import cn.miku.auth.config.MikuConfig;
 import cn.miku.auth.config.MikuMessages;
 import cn.miku.auth.audit.AuditLogger;
+import cn.miku.auth.audit.BackendKickLog;
 import cn.miku.auth.audit.PremiumConflictLog;
 import cn.miku.auth.database.DatabaseManager;
 import cn.miku.auth.migrate.AccountMigrator;
@@ -72,7 +73,7 @@ public final class MikuAuthPlugin {
      * 插件版本：唯一的版本号来源（{@code pom.xml} 需同步修改）。
      * 同时用于 {@code @Plugin} 注解与对外请求的 User-Agent，避免多处硬编码走样。
      */
-    public static final String VERSION = "2.4.5-Beta";
+    public static final String VERSION = "2.4.6-Beta";
 
     private final ProxyServer server;
     private final Logger logger;
@@ -88,6 +89,8 @@ public final class MikuAuthPlugin {
     private AuthManager authManager;
     /** 昵称冲突记录文件（记"同名冲突被顶下线"；关服时需排空写盘队列）。 */
     private PremiumConflictLog conflictLog;
+    /** 后端拒绝进入记录文件（记目标服给出的踢出原因；关服时需排空写盘队列）。 */
+    private BackendKickLog backendKickLog;
     /** 账号迁移器。 */
     private AccountMigrator migrator;
     private boolean packetListenerRegistered;
@@ -186,8 +189,10 @@ public final class MikuAuthPlugin {
         AuditLogger auditLogger = new AuditLogger(database, config, logger);
         // 昵称冲突记录文件（记录"同名冲突被顶下线"；会话校验失败的连接不产生事件，不会写到这里）
         conflictLog = new PremiumConflictLog(dataDirectory, config, logger);
+        // 后端拒绝进入记录文件（目标服给出的踢出原因；同一原因也会转发到玩家聊天栏）
+        backendKickLog = new BackendKickLog(dataDirectory, config, logger);
         authManager = new AuthManager(this, server, logger, config, messages,
-                database, premiumService, dialogService, display, auditLogger, conflictLog);
+                database, premiumService, dialogService, display, auditLogger, conflictLog, backendKickLog);
         migrator = new AccountMigrator(database, auditLogger, logger);
 
         // 事件监听
@@ -233,6 +238,11 @@ public final class MikuAuthPlugin {
             logger.info("[MikuAuth] 昵称冲突记录: {}"
                             + "（同名连接被顶下线时写入，便于事后核对）",
                     conflictLog.file());
+        }
+        if (backendKickLog.enabled()) {
+            logger.info("[MikuAuth] 后端拒绝记录: {}"
+                            + "（玩家被目标服踢回时写入，原因同时转发给玩家）",
+                    backendKickLog.file());
         }
     }
 
@@ -336,6 +346,10 @@ public final class MikuAuthPlugin {
         if (conflictLog != null) {
             // 排空写盘队列，避免丢掉最后几条冲突记录
             conflictLog.shutdown();
+        }
+        if (backendKickLog != null) {
+            // 同理：排空后端拒绝记录的写盘队列
+            backendKickLog.shutdown();
         }
         if (premiumService != null) {
             premiumService.shutdown();

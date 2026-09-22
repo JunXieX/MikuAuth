@@ -192,6 +192,20 @@ public final class MikuConfig {
         return getString("audit.premium-conflict-file", "premium-conflicts.log");
     }
 
+    /**
+     * 后端拒绝进入记录文件名（相对数据目录）。
+     *
+     * <p>记录"玩家已通过认证、但被目标服（或其上的插件，如验证网关/白名单）直接踢回"的事件，
+     * 内容为目标服给出的原因（同一条原因也会转发到玩家聊天栏）。
+     *
+     * <p>不含原因的连接故障（目标服离线等）不会写入本文件——它们由转服调度自动重试。
+     *
+     * @return 空字符串表示关闭该记录
+     */
+    public String backendKickLogFile() {
+        return getString("audit.backend-kick-file", "backend-kicks.log");
+    }
+
     // ---------------------------------------------------------------------
     // 账号迁移
     // ---------------------------------------------------------------------

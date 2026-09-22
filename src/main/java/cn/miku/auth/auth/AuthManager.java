@@ -3,6 +3,7 @@ package cn.miku.auth.auth;
 import cn.miku.auth.bedrock.BedrockDetector;
 import cn.miku.auth.audit.AuditAction;
 import cn.miku.auth.audit.AuditLogger;
+import cn.miku.auth.audit.BackendKickLog;
 import cn.miku.auth.audit.PremiumConflictLog;
 import cn.miku.auth.config.MikuConfig;
 import cn.miku.auth.config.MikuMessages;
@@ -189,7 +190,7 @@ public final class AuthManager {
     public AuthManager(Object plugin, ProxyServer server, Logger logger, MikuConfig config, MikuMessages messages,
                        AuthRepository database, PremiumService premiumService,
                        DialogService dialogService, DisplayManager display,
-                       AuditLogger audit, PremiumConflictLog conflictLog) {
+                       AuditLogger audit, PremiumConflictLog conflictLog, BackendKickLog kickLog) {
         this.plugin = plugin;
         this.server = server;
         this.logger = logger;
@@ -202,7 +203,7 @@ public final class AuthManager {
         this.dialogService = dialogService;
         this.display = display;
         this.throttle = new LoginThrottle(config, logger);
-        this.transfer = new TransferCoordinator(server, plugin, config, logger);
+        this.transfer = new TransferCoordinator(server, plugin, config, messages, kickLog, logger);
         this.cryptoExecutor = new ThreadPoolExecutor(
                 CRYPTO_THREADS, CRYPTO_THREADS,
                 30L, TimeUnit.SECONDS,
@@ -769,10 +770,28 @@ public final class AuthManager {
                                 // 必须把真实原因打出来：缺了它排障只能靠猜（线上踩过）
                                 logger.warn("[调度] {} 送回认证服 '{}' 失败（{}），已断开连接",
                                         player.getUsername(), authServer, failureReason(result, throwable));
-                                player.disconnect(messages.component("kick.auth-error"));
+                                // 认证服自己给出了原因（例如 limbo 人数已满）时原样告诉玩家，
+                                // 比笼统的"认证服务暂时不可用"更能指向真正的问题
+                                player.disconnect(disconnectReason(result, "kick.auth-error"));
                             }
                         }),
                 () -> logger.error("[调度] 无法送回认证服 '{}'（velocity.toml 的 [servers] 中没有它）", authServer));
+    }
+
+    /**
+     * 断开玩家时使用的原因：优先采用对方服务器给出的原因，没有才退回兜底文案。
+     *
+     * <p>与转服路径同源（{@code Result#getReasonComponent()} 即对方服务器发出的 Disconnect 包），
+     * 避免把"对方明确说明的原因"换成一句笼统的"服务不可用"。
+     */
+    private Component disconnectReason(ConnectionRequestBuilder.Result result, String fallbackKey) {
+        if (result != null) {
+            Component reason = result.getReasonComponent().orElse(null);
+            if (reason != null) {
+                return reason;
+            }
+        }
+        return messages.component(fallbackKey);
     }
 
     /** 送服失败的原因描述（连接状态或异常），仅用于日志排障。 */

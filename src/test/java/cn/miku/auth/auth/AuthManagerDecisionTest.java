@@ -3,6 +3,7 @@ package cn.miku.auth.auth;
 import cn.miku.auth.config.MikuConfig;
 import cn.miku.auth.audit.AuditEntry;
 import cn.miku.auth.audit.AuditLogger;
+import cn.miku.auth.audit.BackendKickLog;
 import cn.miku.auth.audit.PremiumConflictLog;
 import cn.miku.auth.audit.AuditRepository;
 import cn.miku.auth.config.MikuMessages;
@@ -517,7 +518,8 @@ class AuthManagerDecisionTest {
                 new DialogService(config, messages, org.slf4j.helpers.NOPLogger.NOP_LOGGER),
                 new DisplayManager(config, messages),
                 new AuditLogger(repository, config, org.slf4j.helpers.NOPLogger.NOP_LOGGER),
-                conflictLog);
+                conflictLog,
+                new BackendKickLog(dataDirectory, config, org.slf4j.helpers.NOPLogger.NOP_LOGGER));
     }
 
     /** 读取冲突记录的数据行（跳过以 # 开头的文件头）；文件不存在时视为空。 */

@@ -1,13 +1,19 @@
 package cn.miku.auth.auth;
 
+import cn.miku.auth.audit.BackendKickLog;
 import cn.miku.auth.config.MikuConfig;
+import cn.miku.auth.config.MikuMessages;
 import com.velocitypowered.api.proxy.Player;
 import com.velocitypowered.api.proxy.ProxyServer;
 import com.velocitypowered.api.proxy.ServerConnection;
 import com.velocitypowered.api.proxy.server.RegisteredServer;
+import net.kyori.adventure.text.Component;
+import net.kyori.adventure.text.serializer.plain.PlainTextComponentSerializer;
 import org.slf4j.Logger;
 
 import java.time.Duration;
+import java.util.Map;
+import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 
@@ -21,9 +27,14 @@ import java.util.concurrent.ConcurrentHashMap;
  * 若立即发起连接请求，会与认证服（尤其 limbo）刚发出的 Join Game 包竞争——
  * 基岩版玩家经 Geyser 转换时会话尚未稳定，请求容易被吞，玩家会永远滞留在认证服。
  *
- * <p><b>为什么要重试</b>：即使延迟后发起，仍可能因目标服瞬时不可达、请求被吞等原因失败。
- * 因此失败时保留挂起标记，由心跳按 {@link #TRANSFER_RETRY_MILLIS} 间隔重试，
- * 直到玩家确实离开认证服或断开连接。
+ * <p><b>失败分两类处理</b>（2026-09-22 起）：
+ * <ol>
+ *   <li><b>目标服明确拒绝</b>（{@code Result#getReasonComponent()} 非空，即目标服自己发了
+ *       Disconnect 包）：原因原样转发到玩家聊天栏并<b>停止重试</b>——重试只会被同样拒绝，
+ *       还会每 5 秒在目标服日志里多刷一次登录记录；</li>
+ *   <li><b>连接层面的故障</b>（目标服离线、连接被意外关闭等，没有原因）：保留挂起标记，
+ *       由心跳按 {@link #TRANSFER_RETRY_MILLIS} 间隔重试，直到玩家确实离开认证服或断开连接。</li>
+ * </ol>
  */
 public final class TransferCoordinator {
 
@@ -35,15 +46,20 @@ public final class TransferCoordinator {
     private final ProxyServer server;
     private final Object plugin;
     private final MikuConfig config;
+    private final MikuMessages messages;
+    private final BackendKickLog kickLog;
     private final Logger logger;
 
     /** 待转服玩家 → 最近一次送服尝试时间戳。 */
     private final ConcurrentHashMap<UUID, Long> pending = new ConcurrentHashMap<>();
 
-    public TransferCoordinator(ProxyServer server, Object plugin, MikuConfig config, Logger logger) {
+    public TransferCoordinator(ProxyServer server, Object plugin, MikuConfig config,
+                               MikuMessages messages, BackendKickLog kickLog, Logger logger) {
         this.server = server;
         this.plugin = plugin;
         this.config = config;
+        this.messages = messages;
+        this.kickLog = kickLog;
         this.logger = logger;
     }
 
@@ -147,7 +163,7 @@ public final class TransferCoordinator {
     // 内部
     // ---------------------------------------------------------------------
 
-    /** 执行转服：解析目标、跳过"已在目标服"场景、校验结果，失败交给心跳重试。 */
+    /** 执行转服：解析目标、跳过"已在目标服"场景、校验结果，按失败类型决定转发原因还是重试。 */
     private void doTransfer(Player player) {
         if (pending.remove(player.getUniqueId()) == null || !player.isActive()) {
             return; // 已取消（断线清理）
@@ -158,21 +174,51 @@ public final class TransferCoordinator {
                     + " 或 velocity.toml 的 try 列表），" + player.getUsername() + " 留在当前服务器");
             return;
         }
+        String serverName = target.getServerInfo().getName();
         // 免密直连场景（正版/基岩/会话免密）：玩家已在目标服，无需再转
-        if (isOnServer(player, target.getServerInfo().getName())) {
+        if (isOnServer(player, serverName)) {
             return;
         }
         player.createConnectionRequest(target).connect().whenComplete((result, throwable) -> {
-            boolean success = throwable == null && result != null && result.isSuccessful();
-            if (!success && player.isActive()) {
-                String reason = throwable != null
-                        ? throwable.getClass().getSimpleName()
-                        : String.valueOf(result.getStatus());
-                logger.warn("[调度] {} 转服至 {} 失败（{}），将在心跳中自动重试",
-                        player.getUsername(), target.getServerInfo().getName(), reason);
-                // 保留/恢复挂起标记，由 retryStuck() 继续重试
-                pending.putIfAbsent(player.getUniqueId(), System.currentTimeMillis());
+            if (throwable == null && result != null && result.isSuccessful()) {
+                return;
             }
+            if (!player.isActive()) {
+                return;
+            }
+            // 目标服主动拒绝时，Velocity 会把它的 Disconnect 包内容放进 Result#getReasonComponent
+            // （ConnectionRequestResults.forDisconnect：status=SERVER_DISCONNECTED，reason=踢出原因）。
+            // 这条原因只有插件看得到：玩家此刻还留在认证服，踢出发生在去目标服的那条连接上。
+            Optional<Component> reason = result != null ? result.getReasonComponent() : Optional.empty();
+            if (reason.isPresent()) {
+                forwardBackendRejection(player, serverName, reason.get());
+                return; // 明确拒绝：不再重试（重试必然得到同样的踢出，只会在目标服多刷登录记录）
+            }
+            String cause = throwable != null
+                    ? throwable.getClass().getSimpleName()
+                    : String.valueOf(result.getStatus());
+            logger.warn("[调度] {} 转服至 {} 失败（{}），将在心跳中自动重试",
+                    player.getUsername(), serverName, cause);
+            // 保留/恢复挂起标记，由 retryStuck() 继续重试
+            pending.putIfAbsent(player.getUniqueId(), System.currentTimeMillis());
         });
+    }
+
+    /**
+     * 把目标服的拒绝原因转发给玩家（聊天栏），并留档。
+     *
+     * <p>玩家坐在认证服里，对"为什么进不去"毫无感知——原因文本原样展示，
+     * 前面加一行说明是哪个服拒的（否则玩家不知道这段话从哪来）。
+     */
+    private void forwardBackendRejection(Player player, String serverName, Component reason) {
+        player.sendMessage(messages.component("transfer.rejected-header", Map.of("server", serverName)));
+        player.sendMessage(reason);
+        player.sendMessage(messages.component("transfer.rejected-hint"));
+
+        String plain = PlainTextComponentSerializer.plainText().serialize(reason)
+                .replaceAll("\\R+", " | ").trim();
+        logger.warn("[调度] {} 被 {} 拒绝进入：{}（原因已转发给玩家）",
+                player.getUsername(), serverName, plain.isEmpty() ? "（目标服未提供文本）" : plain);
+        kickLog.record(player.getUsername(), serverName, plain);
     }
 }

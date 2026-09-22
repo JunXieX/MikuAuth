@@ -10,7 +10,7 @@
 
     <groupId>cn.miku</groupId>
     <artifactId>mikuauth</artifactId>
-    <version>2.4.5-Beta</version>
+    <version>2.4.6-Beta</version>
     <packaging>jar</packaging>
 
     <name>MikuAuth</name>
