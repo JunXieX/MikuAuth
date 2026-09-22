@@ -113,7 +113,7 @@ public final class AuthManager {
         volatile String textKey;
         /** 认证是否已通过。 */
         volatile boolean allowed;
-        /** Dialog 对话框是否打开（决定静默）。 */
+        /** Dialog 对话框是否打开（决定静默）。仅在对话框成功下发后置位，与 dialog.enabled 无关。 */
         volatile boolean dialogOpen;
         /** 密码错误次数。 */
         volatile int loginTries;
@@ -859,6 +859,17 @@ public final class AuthManager {
         int timeout = config.authTimeoutSeconds();
         display.startTracking(player, textKey, Map.of("player", player.getUsername()), timeout);
 
+        // Dialog 菜单被服主关闭（config.yml 的 dialog.enabled: false）：一律走聊天栏。
+        // DisplayManager 的 Title/BossBar 已在上面启动，这里只需补一条用法提示。
+        // 注意这里**不能**调用 enterSilent：关闭开关的服务器永远不进入静默态，
+        // 否则该玩家的所有聊天提示都会被丢弃，且没有任何关闭对话框的按钮能解除它。
+        if (!config.dialogEnabled()) {
+            logger.debug("[对话框] 开关 dialog.enabled 已关闭，" + player.getUsername()
+                    + " 使用聊天栏 " + ("register".equals(textKey) ? "/register" : "/login") + " 完成认证");
+            display.chat(player, textKey + ".chat-usage", Map.of());
+            return;
+        }
+
         long delayMillis = config.dialogShowDelayMillis();
         if (delayMillis <= 0) {
             tryShowDialog(player, session, textKey);
@@ -880,9 +891,16 @@ public final class AuthManager {
     /**
      * 立即发送 Dialog；成功后进入静默。对话框正文显示配置的认证时限。
      *
+     * <p>调用点有两处：{@code startPending} 的直接路径，以及"延迟发送"的调度任务。
+     * 后者在 700ms 之后才执行，期间配置可能已被 {@code /mikuauth reload} 关掉，
+     * 因此这里<b>再查一次开关</b>——不能只依赖调用点的判断。
+     *
      * @return 是否成功发送
      */
     private boolean tryShowDialog(Player player, AuthSession session, String textKey) {
+        if (!config.dialogEnabled()) {
+            return false;
+        }
         String error = textKey.equals("login")
                 ? dialogService.showLogin(player, null)
                 : dialogService.showRegister(player, null);
@@ -1489,10 +1507,14 @@ public final class AuthManager {
      * 玩家看到的是"对话框关了、没有任何提示、Title/BossBar 也消失"，只能干等到超时被踢
      * ——空密码提交正是这条路径（{@code retryDialog=false}）。
      * 同理，重开失败时也必须补发聊天提示，否则提示同样会丢。
+     *
+     * <p>开关关闭时（{@code dialog.enabled: false}）不存在"重开对话框"这回事：
+     * 此时玩家本来就没进过静默态（见 {@code startPending}），走的就是普通聊天栏提示。
      */
     private void failLogin(Player player, AuthSession session, String errorKey,
                            Map<String, String> placeholders, boolean retryDialog) {
-        boolean reopen = retryDialog && player.isActive() && "login".equals(session.textKey);
+        boolean reopen = retryDialog && config.dialogEnabled()
+                && player.isActive() && "login".equals(session.textKey);
         if (!reopen) {
             display.exitSilent(player);
         }
@@ -1523,7 +1545,7 @@ public final class AuthManager {
     private void failRegister(Player player, AuthSession session, String errorKey,
                               Map<String, String> placeholders) {
         display.chat(player, errorKey, placeholders);
-        if (player.isActive() && "register".equals(session.textKey)) {
+        if (config.dialogEnabled() && player.isActive() && "register".equals(session.textKey)) {
             String error = dialogService.showRegister(player,
                     renderText(errorKey, placeholders));
             if (error == null) {
@@ -1590,6 +1612,11 @@ public final class AuthManager {
     /**
      * 对话框关闭回调（由 /mikuauth-close 命令触发，或对话框未能锁定输入时
      * 收到的防御性聊天包触发）：解除静默并给出聊天栏用法提示。
+     *
+     * <p>{@code config.dialogEnabled()} 判断是纯防御：{@code dialogOpen} 只会在
+     * {@code DialogService} 发送成功时置位，而那时开关必然是开着的；加上这一层是为了
+     * "开关关闭后残留的 dialogOpen 标记"这类不可能状态也能被安全兜住——它一旦残留，
+     * 后续所有聊天提示都会被静默规则丢弃。
      */
     public void handleClientActivity(Player player) {
         AuthSession session = sessions.get(player.getUniqueId());
@@ -1598,6 +1625,9 @@ public final class AuthManager {
         }
         session.dialogOpen = false;
         display.exitSilent(player);
+        if (!config.dialogEnabled()) {
+            return;
+        }
         display.chat(player, session.textKey + ".chat-usage", Map.of());
     }
 
@@ -1614,6 +1644,16 @@ public final class AuthManager {
     /** 玩家是否已有认证会话（进入认证服只处理一次）。 */
     public boolean hasSession(Player player) {
         return sessions.containsKey(player.getUniqueId());
+    }
+
+    /**
+     * 该玩家是否正被 Title/BossBar 跟踪。
+     *
+     * <p>仅用于测试断言"认证流程确实启动了显示跟踪"——Dialog 开关关闭时，
+     * 提示通道应立刻切回 Title/BossBar，若跟踪没建立，玩家在认证服里将完全无提示。
+     */
+    public boolean isTrackedForDisplay(UUID playerId) {
+        return display.isTracking(playerId);
     }
 
     // ---------------------------------------------------------------------

@@ -37,10 +37,15 @@ import org.slf4j.Logger;
  *
  * <p>可用性判定（全部惰性执行，绝不在构造期缓存）：
  * <ul>
+ *   <li>{@code config.yml} 的 {@code dialog.enabled} 为 true（服主可整体关闭对话框菜单）；</li>
  *   <li>packetevents-velocity 插件已安装且 API 就绪；</li>
  *   <li>玩家客户端版本 ≥ 1.21.6。</li>
  * </ul>
  * 任一条件不满足即降级为聊天栏 + Title + BossBar 提示。
+ *
+ * <p><b>开关判断放在 {@code AuthManager} 而不是这里</b>：关闭开关时要做的不是"发送失败后降级"，
+ * 而是"根本不进入静默态、直接按聊天栏流程走"。让本类返回一个失败原因，调用方还得区分
+ * "开关关了"与"客户端不支持"，反而更容易把静默规则搞错。
  *
  * <p><b>本类只"发送"对话框，不"关闭"它</b>：对话框的两个按钮都走
  * {@link DialogAction#CLOSE}，客户端在按钮动作执行后自行关闭界面；"返回聊天栏"

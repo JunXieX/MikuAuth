@@ -198,42 +198,44 @@ class ConfigUpdaterTest {
     }
 
     // ---------------------------------------------------------------------
-    // 废弃键提示（2.1.2 的 dialog.enabled 已不再生效）
+    // 废弃键提示
+    //
+    // 当前 RETIRED_KEYS 为空：唯一一个曾经的废弃键 dialog.enabled 在 2.7.0 重新成为
+    // 真实开关（关闭后回到聊天栏登录），必须从表中移除——留着会让服主看到
+    // "本键不再生效"的注释，而它其实已经生效。
+    //
+    // 下面第一个用例因此改为断言"不再标注"；后两个用例仍对废弃键机制本身做巡检。
     // ---------------------------------------------------------------------
 
     @Test
-    void retiredKeyIsNoticedExactlyOnce() throws Exception {
-        // 合并"只增不改"，所以老配置里的 dialog.enabled 会永久留在服主文件中，
-        // 看起来仍然生效（服主以为对话框已关闭，实际恒开）——必须在它前面插一行说明
+    void reactivatedDialogEnabledIsNoLongerMarkedRetired() throws Exception {
+        // 老配置（2.1.2 样本）里就带着 dialog.enabled: true。该键现在重新生效，
+        // 因此既不能被标注废弃，也不该被模板补一份（用户已经有这个键了）
         Path file = writeLegacyConfig();
         ConfigUpdater.merge(file, DEFAULT_CONFIG, null);
         String text = Files.readString(file, StandardCharsets.UTF_8);
 
-        int first = text.indexOf("已废弃：");
-        assertTrue(first > 0, "废弃键之前应插入说明注释");
-        assertEquals(-1, text.indexOf("已废弃：", first + 1), "同一废弃键只应提示一次");
-
-        // 键本身必须原样保留（由服主自行决定是否删除），且注释不影响解析
+        assertFalse(text.contains("已废弃："),
+                "dialog.enabled 已重新生效，不得再插入'已废弃'注释");
+        // 键本身必须原样保留，且注释不影响解析
         Map<String, Object> dialog = section(parse(file), "dialog");
         assertEquals(Boolean.TRUE, dialog.get("enabled"));
     }
 
     @Test
-    void retiredKeyIsNoticedEvenWhenNothingElseChanges() throws Exception {
-        // 用户的配置已经是最新版（没有需要补充的段落），只是额外留着废弃键：
-        // 此时仍必须写一次提示，否则这行会一直"假装生效"且永远没人发现
-        String template = resource(DEFAULT_CONFIG).replace("\r\n", "\n")
-                .replace("\ndialog:\n", "\ndialog:\n  enabled: false\n");
+    void retiredKeyNoticeIsNotAddedWhenKeyStaysInSync() throws Exception {
+        // 覆盖废弃键机制的巡检用例：用户配置已是最新版（没有需要补充的段落），
+        // 且不含任何废弃键时，合并必须报告"无改动"且不写提示。
+        // 注意：这里刻意不再往模板里塞 dialog.enabled —— 它现在是合法键，
+        // 塞进去只会命中"用户已有该键、跳过"这条正常分支，测不出废弃键逻辑。
         Path file = tempDir.resolve("config.yml");
-        Files.writeString(file, template, StandardCharsets.UTF_8);
+        Files.writeString(file, resource(DEFAULT_CONFIG).replace("\r\n", "\n"),
+                StandardCharsets.UTF_8);
 
         ConfigUpdater.Result result = ConfigUpdater.merge(file, DEFAULT_CONFIG, null);
 
-        assertTrue(result.changed(), "即便没有新增段，也应为废弃键插入提示");
-        assertTrue(Files.readString(file, StandardCharsets.UTF_8).contains("已废弃："));
-
-        // 第二次合并必须回到"无改动"状态
-        assertFalse(ConfigUpdater.merge(file, DEFAULT_CONFIG, null).changed());
+        assertFalse(result.changed(), "配置已是最新版时不应有任何改动");
+        assertFalse(Files.readString(file, StandardCharsets.UTF_8).contains("已废弃："));
     }
 
     @Test

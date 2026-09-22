@@ -42,6 +42,10 @@ import org.slf4j.Logger;
  *   <li>首次修改前留一份 {@code <文件名>.bak}；</li>
  *   <li>整个过程幂等：第二次启动不会重复插入。</li>
  * </ul>
+ *
+ * <p><b>废弃键的标注</b>：本类只补键、不删键，因此老配置里已经存在的废弃键只能靠
+ * {@link #RETIRED_KEYS} 就地插入一行注释来标注，否则它会"看起来仍然生效"。
+ * 反过来，某个键一旦重新生效（例如 {@code dialog.enabled}），就必须从该表中移除。
  */
 final class ConfigUpdater {
 
@@ -59,15 +63,17 @@ final class ConfigUpdater {
      * 已废弃的配置键：路径 → 废弃说明。
      *
      * <p>合并只增不改，因此老配置里已经存在的废弃键会永久留在服主文件中。
-     * 危险之处在于：它<b>看起来仍然生效</b>——例如 2.1.2 的 {@code dialog.enabled: false}
-     * 会让服主以为对话框已关闭，而新版里对话框是恒开的（PacketEvents 已是强依赖）。
+     * 危险之处在于：它<b>看起来仍然生效</b>——例如 2.1.0 的某个键被移除后，
+     * 服主仍会以为自己的设置起作用。
      *
      * <p>处理方式：在该键<b>上一行</b>插入一条说明注释（纯插入，不改动、不删除用户写的行），
      * 让服主打开文件就能看到"这行已经没用了"。说明文本里的 {@code ⚠} 同时充当幂等标记。
+     *
+     * <p><b>键恢复生效时必须从这里删除</b>：{@code dialog.enabled} 曾在 2.2.0 被标记废弃
+     * （当时对话框恒开），2.7.0 起它重新成为一个真实开关——留在表里会让服主看到
+     * "本键不再生效"的注释，而实际上它已经生效，属于最坏的一类文档错误。
      */
-    private static final Map<String, String> RETIRED_KEYS = Map.of(
-            "dialog.enabled",
-            "对话框自 2.2.0 起恒开（PacketEvents 为强依赖，缺失时插件不会加载），本键不再生效，可安全删除");
+    private static final Map<String, String> RETIRED_KEYS = Map.of();
 
     /** 合并结果。 */
     record Result(List<String> added, boolean changed) {

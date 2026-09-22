@@ -240,6 +240,53 @@ class ConfigAndMessagesTest {
     }
 
     // ---------------------------------------------------------------------
+    // Dialog 对话框开关
+    // ---------------------------------------------------------------------
+
+    @Test
+    void dialogIsEnabledByDefault() throws Exception {
+        MikuConfig config = new MikuConfig();
+        config.load(tempDir, null);
+
+        assertTrue(config.dialogEnabled(), "对话框菜单应默认开启（保持原有行为）");
+        assertEquals(700, config.dialogShowDelayMillis());
+    }
+
+    @Test
+    void dialogCanBeDisabledExplicitly() throws Exception {
+        // 关闭后必须能读到 false：这是"恢复成聊天栏登录"的唯一触发条件，
+        // 若被静默回退成默认 true，服主会以为开关失效
+        Files.writeString(tempDir.resolve("config.yml"), """
+                dialog:
+                  enabled: false
+                  show-delay-millis: 1000
+                """, StandardCharsets.UTF_8);
+
+        MikuConfig config = new MikuConfig();
+        config.load(tempDir, null);
+
+        assertFalse(config.dialogEnabled());
+        assertEquals(1000, config.dialogShowDelayMillis());
+    }
+
+    @Test
+    void dialogEnabledUserValueWinsOverBuiltInDefault() throws Exception {
+        // 用户文件里的 dialog.enabled 必须压过内置默认值 true ——
+        // 这正是老配置（2.1.2 起写的 dialog.enabled: false）重新生效的路径
+        Files.writeString(tempDir.resolve("config.yml"), """
+                dialog:
+                  enabled: false
+                """, StandardCharsets.UTF_8);
+
+        MikuConfig config = new MikuConfig();
+        config.load(tempDir, null);
+
+        assertFalse(config.dialogEnabled());
+        // 用户没写的键仍然回退内置默认
+        assertEquals(700, config.dialogShowDelayMillis());
+    }
+
+    // ---------------------------------------------------------------------
     // 工具
     // ---------------------------------------------------------------------
 

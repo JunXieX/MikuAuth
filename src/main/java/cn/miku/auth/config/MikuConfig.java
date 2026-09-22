@@ -273,6 +273,23 @@ public final class MikuConfig {
     // Dialog 对话框
     // ---------------------------------------------------------------------
 
+    /**
+     * Dialog 对话框菜单总开关（默认开启）。
+     *
+     * <p>关闭后一律走聊天栏命令（{@code /login} / {@code /register}）+ Title + BossBar，
+     * 不再下发 {@code show_dialog} 数据包。
+     *
+     * <p>与"自动降级"的分工：客户端版本低于 1.21.6、PacketEvents 未就绪或其尚未识别
+     * 该客户端协议时，插件本来就无法下发对话框，会自行降级——那些情况<b>不需要</b>关本项。
+     * 本项是给服主的<b>主动选择</b>：即便客户端支持，也统一用聊天栏交互。
+     *
+     * <p>关闭时<b>不会再进入静默态</b>（静默仅由 {@code DialogService} 发送成功后触发），
+     * 因此聊天栏提示、Title、BossBar 全部按常规路径正常显示，无需额外处理。
+     */
+    public boolean dialogEnabled() {
+        return getBoolean("dialog.enabled", true);
+    }
+
     /** 延迟多久再弹对话框（毫秒）：避开子服 Join Game 包竞争。 */
     public int dialogShowDelayMillis() {
         return clamp(getInt("dialog.show-delay-millis", 700), 0, 10000);

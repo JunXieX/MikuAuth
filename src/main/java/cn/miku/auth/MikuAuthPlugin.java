@@ -44,7 +44,8 @@ import java.time.Duration;
  *   <li>Java 正版免密：并发查询 Mojang / Ashcon / WPME 三个验证源，任一确认即强制
  *       正版会话校验，校验通过后免密进入；</li>
  *   <li>基岩版免密：Floodgate API 识别后直接放行；</li>
- *   <li>离线账号：注册 / 登录支持原版 Dialog 对话框（PacketEvents），支持自助改密，
+ *   <li>离线账号：注册 / 登录支持原版 Dialog 对话框（PacketEvents，可用
+ *       {@code dialog.enabled} 关闭以统一走聊天栏），支持自助改密，
  *       登录后一段时间内<b>同 IP 免密</b>；</li>
  *   <li>安全风控：同 IP 提交限速、跨会话失败计数与临时封禁；</li>
  *   <li>Title + BossBar 提示；Dialog 打开期间静默，关闭后恢复；</li>
@@ -56,7 +57,7 @@ import java.time.Duration;
         id = "mikuauth",
         name = "MikuAuth",
         version = MikuAuthPlugin.VERSION,
-        description = "Velocity 登录验证插件：正版多源免密 / 基岩版免密 / Dialog 对话框登录 / 同 IP 会话免密 / SQLite + MariaDB",
+        description = "Velocity 登录验证插件：正版多源免密 / 基岩版免密 / Dialog 对话框登录（可开关）/ 同 IP 会话免密 / SQLite + MariaDB",
         authors = {"JunXieX"},
         dependencies = {
                 // 强依赖：packetevents-velocity 缺失时 Velocity 不会加载本插件
@@ -236,6 +237,11 @@ public final class MikuAuthPlugin {
                 premiumService.hasResolvers() ? "启用" : "禁用",
                 config.bedrockAutoLogin() ? "启用" : "禁用",
                 config.authServer());
+        // Dialog 菜单：关闭时明确提示"已按聊天栏模式运行"，避免服主以为插件没生效
+        logger.info("[MikuAuth] Dialog 对话框菜单: {}",
+                config.dialogEnabled()
+                        ? "启用（客户端 1.21.6+ 且 PacketEvents 就绪时使用，否则自动降级为聊天栏）"
+                        : "已关闭（全部玩家使用聊天栏 /login、/register）");
         if (conflictLog.enabled()) {
             logger.info("[MikuAuth] 昵称冲突记录: {}"
                             + "（同名连接被顶下线时写入，便于事后核对）",

@@ -87,14 +87,14 @@ changepassword:
 
 # ----------------------------------------------------------------------------
 # Dialog 对话框文本（原版 1.21.6+ 对话框菜单）
-# 仅在使用 Dialog 时显示；版本过低或未装 PacketEvents 时不会用到。
+# 仅在客户端版本 ≥ 1.21.6、PacketEvents 已就绪、且 config.yml 的 dialog.enabled 为 true 时显示。
 # ----------------------------------------------------------------------------
 dialog:
 
   login:
     title: "<gradient:#ffd700:#ff8800>登录验证</gradient>"
     # {seconds} = 认证剩余秒数
-    body: "<gray>欢迎回来，</gray><yellow>{player}</yellow><gray>！</gray>\n<yellow>剩余认证时间：{seconds} 秒</yellow>\n<gray>请在下方输入框中输入密码后点击按钮完成登录。</gray>\n<dark_gray>提示：点击「返回聊天栏」按钮可改用聊天栏登录。</dark_gray>"
+    body: "<gray>欢迎回来，</gray><yellow>{player}</yellow><gray>！</gray>\n<yellow>剩余认证时间：{seconds} 秒</yellow>\n<gray>请在下方输入框中输入密码后点击按钮完成登录。</gray>\n<dark_gray>提示：点击「返回聊天栏」可改用 /login 命令登录。</dark_gray>"
     input-label: "<yellow>游戏密码</yellow>"
     button: "<green>确认登录</green>"
     button-tooltip: "<gray>点击提交密码</gray>"
@@ -104,7 +104,7 @@ dialog:
   register:
     title: "<gradient:#00e0ff:#a855f7>账号注册</gradient>"
     # {seconds} = 认证剩余秒数
-    body: "<gray>首次进入，</gray><yellow>{player}</yellow><gray>！</gray>\n<yellow>剩余认证时间：{seconds} 秒</yellow>\n<gray>请在下方设置密码（需在两个输入框中输入相同内容）。</gray>\n<dark_gray>提示：点击「返回聊天栏」按钮可改用聊天栏注册。</dark_gray>"
+    body: "<gray>首次进入，</gray><yellow>{player}</yellow><gray>！</gray>\n<yellow>剩余认证时间：{seconds} 秒</yellow>\n<gray>请在下方设置密码（需在两个输入框中输入相同内容）。</gray>\n<dark_gray>提示：点击「返回聊天栏」可改用 /register 命令注册。</dark_gray>"
     input-label: "<yellow>设置密码</yellow>"
     confirm-label: "<yellow>确认密码</yellow>"
     button: "<green>完成注册</green>"

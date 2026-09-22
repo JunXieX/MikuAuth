@@ -21,6 +21,8 @@ import com.velocitypowered.api.proxy.ProxyServer;
 import com.velocitypowered.api.proxy.server.RegisteredServer;
 import com.velocitypowered.api.scheduler.ScheduledTask;
 import com.velocitypowered.api.scheduler.Scheduler;
+import net.kyori.adventure.text.Component;
+import net.kyori.adventure.text.serializer.plain.PlainTextComponentSerializer;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -237,6 +239,53 @@ class AuthManagerDecisionTest {
         authManager.handleConnected(playerFor("alice"));
 
         assertFalse(authManager.isSessionVerifiedFor("alice"), "标记用后即删，避免影响后续连接");
+    }
+
+    // ---------------------------------------------------------------------
+    // Dialog 开关关闭 → 回到聊天栏登录
+    // ---------------------------------------------------------------------
+
+    @Test
+    void dialogDisabledSendsChatUsageInsteadOfDialog() {
+        // dialog.enabled: false 时，落到认证服的离线玩家必须收到聊天栏用法提示，
+        // 且绝不能进入静默态（静默只由对话框下发成功触发；一旦误进，
+        // 该玩家的所有聊天提示都会被丢弃，而又没有任何对话框按钮能解除它）
+        config = loadConfigWithDialog(false);
+        authManager = newAuthManager();
+        repository.player = Optional.of(offlineAccount("alice", "hash"));
+
+        Player player = playerFor("alice");
+        authManager.handleConnected(player, "limbo");
+
+        verify(player, times(1)).sendMessage(chatMessageContaining("/login"));
+        verify(player, never()).showTitle(any(net.kyori.adventure.title.Title.class));
+        assertFalse(repository.audits.isEmpty(), "关掉对话框不影响认证流程本身");
+    }
+
+    @Test
+    void dialogDisabledTellsUnregisteredPlayerToRegister() {
+        config = loadConfigWithDialog(false);
+        authManager = newAuthManager();
+        repository.player = Optional.empty();
+
+        Player player = playerFor("newcomer");
+        authManager.handleConnected(player, "limbo");
+
+        verify(player, times(1)).sendMessage(chatMessageContaining("/register"));
+    }
+
+    @Test
+    void dialogEnabledKeepsStartingTheAuthFlow() throws IOException {
+        // 对照组：开关保持默认开启时行为不变（仍走原有流程，Title/BossBar 照常显示）
+        config = loadConfig(true);
+        authManager = newAuthManager();
+        repository.player = Optional.of(offlineAccount("alice", "hash"));
+
+        Player player = playerFor("alice");
+        authManager.handleConnected(player, "limbo");
+
+        assertTrue(authManager.isTrackedForDisplay(player.getUniqueId()),
+                "开关开启时应照常建立 Title/BossBar 跟踪（不因本改动退化）");
     }
 
     // ---------------------------------------------------------------------
@@ -467,6 +516,24 @@ class AuthManagerDecisionTest {
     }
 
     private MikuConfig loadConfig(boolean sessionEnabled, boolean renewOnLogin) throws IOException {
+        return loadConfig(sessionEnabled, renewOnLogin, true);
+    }
+
+    /**
+     * 写一份最小配置并加载。
+     *
+     * @param dialogEnabled config.yml 的 {@code dialog.enabled}
+     */
+    private MikuConfig loadConfigWithDialog(boolean dialogEnabled) {
+        try {
+            return loadConfig(true, true, dialogEnabled);
+        } catch (IOException e) {
+            throw new AssertionError("写测试配置失败", e);
+        }
+    }
+
+    private MikuConfig loadConfig(boolean sessionEnabled, boolean renewOnLogin, boolean dialogEnabled)
+            throws IOException {
         // bcrypt-cost 取最低值：测试只需验证"哈希被写入且可校验"，
         // 用默认 cost=10 会让每个涉及哈希的用例多花上百毫秒
         // 认证服名字取 limbo，与线上部署保持一致
@@ -480,10 +547,18 @@ class AuthManagerDecisionTest {
                 session:
                   enabled: %s
                   renew-on-session-login: %s
-                """.formatted(sessionEnabled, renewOnLogin), StandardCharsets.UTF_8);
+                dialog:
+                  enabled: %s
+                """.formatted(sessionEnabled, renewOnLogin, dialogEnabled), StandardCharsets.UTF_8);
         MikuConfig loaded = new MikuConfig();
         loaded.load(dataDirectory, null);
         return loaded;
+    }
+
+    /** 匹配"渲染后文本包含某片段"的聊天消息（MiniMessage 标签已被渲染掉，故不能直接比对原文）。 */
+    private static Component chatMessageContaining(String fragment) {
+        return org.mockito.ArgumentMatchers.argThat(component -> component != null
+                && PlainTextComponentSerializer.plainText().serialize(component).contains(fragment));
     }
 
     /** 构造可满足转服调度的 ProxyServer（handleConnected 完成认证后会调度转服）。 */

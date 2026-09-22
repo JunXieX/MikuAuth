@@ -145,6 +145,16 @@ public final class DisplayManager {
         return silentPlayers.contains(playerId);
     }
 
+    /**
+     * 是否正在跟踪该玩家的 Title/BossBar 显示。
+     *
+     * <p>注意与 {@link #isSilent} 的区别：跟踪条目只在 {@code display.title} 或
+     * {@code display.bossbar} 至少一项开启时才会创建，因此两者相互独立。
+     */
+    public boolean isTracking(UUID playerId) {
+        return tracked.containsKey(playerId);
+    }
+
     /** 显示认证成功 Title 并结束跟踪（静默状态下由调用方决定何时展示）。 */
     public void showSuccess(Player player, String titleKey, String subKey, Map<String, String> placeholders) {
         stopTracking(player);
