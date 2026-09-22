@@ -74,7 +74,7 @@ public final class MikuAuthPlugin {
      * 插件版本：唯一的版本号来源（{@code pom.xml} 需同步修改）。
      * 同时用于 {@code @Plugin} 注解与对外请求的 User-Agent，避免多处硬编码走样。
      */
-    public static final String VERSION = "2.6.0";
+    public static final String VERSION = "2.7.0";
 
     private final ProxyServer server;
     private final Logger logger;
