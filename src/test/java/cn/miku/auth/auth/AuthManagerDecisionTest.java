@@ -13,8 +13,10 @@ import cn.miku.auth.dialog.DialogService;
 import cn.miku.auth.display.DisplayManager;
 import cn.miku.auth.premium.PremiumService;
 import cn.miku.auth.security.PasswordHasher;
+import com.velocitypowered.api.proxy.ConnectionRequestBuilder;
 import com.velocitypowered.api.proxy.Player;
 import com.velocitypowered.api.proxy.ProxyServer;
+import com.velocitypowered.api.proxy.server.RegisteredServer;
 import com.velocitypowered.api.scheduler.ScheduledTask;
 import com.velocitypowered.api.scheduler.Scheduler;
 import org.junit.jupiter.api.BeforeEach;
@@ -39,6 +41,9 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 /**
@@ -297,11 +302,60 @@ class AuthManagerDecisionTest {
     }
 
     // ---------------------------------------------------------------------
-    // 工具
+    // 离线玩家落在哪台服务器（认证服隔离边界）
     // ---------------------------------------------------------------------
 
     /**
-     * 等待异步改密链路（校验 → 写库 → 清会话）跑完。
+     * 落在认证服上的离线玩家，绝不能被"送回"他自己已经在的那台服务器。
+     *
+     * <p><b>回归点（2026-09-22 线上实测）</b>：{@code ServerConnectedEvent} 发生时
+     * {@code player.getCurrentServer()} 还没写回（读到的仍是空的），旧实现据此把
+     * "落在认证服"误判成"落在正式服"，于是把玩家送回他已经在的认证服 ——
+     * Velocity 以 ALREADY_CONNECTED 拒绝，这个失败又被当成"认证服不可用"，
+     * 玩家直接被踢下线。后果是<b>离线玩家永远注册不了、登录不了</b>
+     * （正版/基岩/会话免密玩家在前面的分支就返回了，所以问题被掩盖了很久）。
+     */
+    @Test
+    void offlinePlayerLandingOnAuthServerIsNotSentAway() {
+        repository.player = Optional.empty();               // 未注册的离线玩家
+        Player player = playerFor("newcomer");              // getCurrentServer() 为空，复现该时序
+        int before = repository.findPlayerCalls;
+
+        // 事件告诉我们在 limbo（认证服）上 —— 这就是权威答案
+        authManager.handleConnected(player, "limbo");
+
+        verify(player, never()).disconnect(any());
+        verify(player, never()).createConnectionRequest(any());
+        assertTrue(repository.findPlayerCalls > before,
+                "应直接进入登录/注册流程（查库决定弹哪个框），而不是被送走");
+    }
+
+    /** 确实停在正式服上的离线玩家，仍然要送回认证服（隔离边界不能丢）。 */
+    @Test
+    void offlinePlayerOnRealServerIsSentToAuthServer() {
+        repository.player = Optional.empty();
+        RegisteredServer limbo = mock(RegisteredServer.class);
+        when(proxy.getServer("limbo")).thenReturn(Optional.of(limbo));
+
+        ConnectionRequestBuilder builder = mock(ConnectionRequestBuilder.class);
+        ConnectionRequestBuilder.Result ok = mock(ConnectionRequestBuilder.Result.class);
+        when(ok.isSuccessful()).thenReturn(true);
+        when(builder.connect()).thenReturn(CompletableFuture.completedFuture(ok));
+
+        Player player = playerFor("newcomer");
+        when(player.createConnectionRequest(limbo)).thenReturn(builder);
+
+        authManager.handleConnected(player, "sd");          // 落在正式服 sd 上
+
+        verify(player, times(1)).createConnectionRequest(limbo);
+        verify(player, never()).disconnect(any());
+    }
+
+    // ---------------------------------------------------------------------
+    // 工具
+    // ---------------------------------------------------------------------
+
+    /** 等待异步改密链路（校验 → 写库 → 清会话）跑完。
      *
      * <p>以"会话已清除"作为完成信号：它是链路的最后一步，观察到它时
      * 写库与审计都已经发生。
@@ -341,9 +395,10 @@ class AuthManagerDecisionTest {
     private MikuConfig loadConfig(boolean sessionEnabled, boolean renewOnLogin) throws IOException {
         // bcrypt-cost 取最低值：测试只需验证"哈希被写入且可校验"，
         // 用默认 cost=10 会让每个涉及哈希的用例多花上百毫秒
+        // 认证服名字取 limbo，与线上部署保持一致
         Files.writeString(dataDirectory.resolve("config.yml"), """
                 server:
-                  auth-server: "auth"
+                  auth-server: "limbo"
                 premium:
                   enabled: false
                 login:
@@ -370,8 +425,11 @@ class AuthManagerDecisionTest {
         return proxy;
     }
 
+    private ProxyServer proxy;
+
     private AuthManager newAuthManager() {
-        return new AuthManager(new Object(), schedulableServer(),
+        proxy = schedulableServer();
+        return new AuthManager(new Object(), proxy,
                 org.slf4j.helpers.NOPLogger.NOP_LOGGER,
                 config, messages, repository,
                 new PremiumService(config, org.slf4j.helpers.NOPLogger.NOP_LOGGER),
@@ -397,6 +455,8 @@ class AuthManagerDecisionTest {
         private volatile String writtenPasswordHash;
         /** 是否调用过 clearSession（改密/重置密码后应让旧会话立即失效）。 */
         private volatile boolean sessionCleared;
+        /** findPlayer 被调用的次数：用于断言"认证流程确实推进到查库这一步"。 */
+        private volatile int findPlayerCalls;
         /** 收到的审计记录（便于断言"该记的都记了"）。 */
         private final List<AuditEntry> audits = new java.util.concurrent.CopyOnWriteArrayList<>();
 
@@ -423,6 +483,7 @@ class AuthManagerDecisionTest {
 
         @Override
         public CompletableFuture<Optional<StoredPlayer>> findPlayer(String nickname) {
+            findPlayerCalls++;
             return CompletableFuture.completedFuture(player);
         }
 

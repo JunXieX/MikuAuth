@@ -201,6 +201,10 @@ public final class AuthListener {
      *
      * <p>覆盖两类落点：认证服（离线玩家）与免密直连的目标服
      * （正版/基岩玩家）。已完成认证的玩家由 authenticated 标记短路。
+     *
+     * <p>这里把 {@code event.getServer()} 一并交给认证状态机：在 ServerConnectedEvent
+     * 这一刻 {@code player.getCurrentServer()} 还没写回（实测），
+     * 只靠它会把"落在认证服"误判成"落在正式服"，把离线玩家踢下线。
      */
     @Subscribe
     public void onServerConnected(ServerConnectedEvent event) {
@@ -208,7 +212,7 @@ public final class AuthListener {
         if (authManager.hasSession(player)) {
             return; // 已在认证流程中（重复触发）
         }
-        authManager.handleConnected(player);
+        authManager.handleConnected(player, event.getServer().getServerInfo().getName());
     }
 
     /** 未认证玩家被认证服踢出时直接断开，不重定向到正式服。 */

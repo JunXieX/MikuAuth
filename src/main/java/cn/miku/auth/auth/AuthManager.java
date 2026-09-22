@@ -19,6 +19,7 @@ import cn.miku.auth.security.PasswordPolicy;
 import cn.miku.auth.util.UuidUtil;
 import at.favre.lib.crypto.bcrypt.BCrypt;
 import com.velocitypowered.api.event.connection.DisconnectEvent;
+import com.velocitypowered.api.proxy.ConnectionRequestBuilder;
 import com.velocitypowered.api.proxy.Player;
 import com.velocitypowered.api.proxy.ProxyServer;
 import com.velocitypowered.api.proxy.server.RegisteredServer;
@@ -594,6 +595,25 @@ public final class AuthManager {
      * 目标服（免密，无需认证），在本方法中完成登记与提示。
      */
     public void handleConnected(Player player) {
+        handleConnected(player, null);
+    }
+
+    /**
+     * 玩家连接后的入口，带"刚连上哪台服务器"。
+     *
+     * <p><b>为什么必须传 connectedServer</b>：判断"玩家在不在认证服"<b>不能</b>用
+     * {@code player.getCurrentServer()} —— 在 {@code ServerConnectedEvent} 这一刻，
+     * 该连接还没写回 player 的当前服务器（VelocityCTD 实测：事件里读到的是空的）。
+     * 于是一个正常落在认证服的离线玩家会被误判成"停留在正式服"，紧接着插件会把他
+     * "送回"他已经在的那台认证服 —— Velocity 以 ALREADY_CONNECTED 拒绝，而这个失败又被
+     * 当成"认证服不可用"，玩家直接被踢下线。表现为：<b>离线玩家永远无法注册/登录</b>。
+     * 正版/基岩/会话免密玩家在第 1~3 步就返回了，所以这个坑只在离线认证路径上暴露。
+     *
+     * <p>{@code ServerConnectedEvent.getServer()} 才是这一刻的权威答案。
+     *
+     * @param connectedServer 刚连上的服务器名；null = 未知，回退到实时查询
+     */
+    public void handleConnected(Player player, String connectedServer) {
         // 同一次连接内已认证完成（如免密直连后触发的目标服连接事件）：
         // 不再重复启动流程；断线重连时 authenticated 会被清除，重新判定
         if (authenticated.contains(player.getUniqueId())) {
@@ -643,13 +663,20 @@ public final class AuthManager {
             return;
         }
         // 4) 需要密码认证：必须位于认证服（隔离边界），否则先送回认证服
-        if (!transfer.isOnAuthServer(player)) {
-            logger.warn("[调度] {} 需要在认证服完成认证，但当前位于非认证服，已送回认证服",
-                    player.getUsername());
-            sendToAuthServer(player);
+        String currentServer = resolveCurrentServer(player, connectedServer);
+        if (!isAuthServerName(currentServer)) {
+            logger.warn("[调度] {} 需要在认证服 '{}' 完成认证，但当前位于 '{}'，已送回认证服",
+                    player.getUsername(), config.authServer(),
+                    currentServer == null ? "未知" : currentServer);
+            sendToAuthServer(player, session, currentServer);
             return;
         }
         // 5) 已注册登录 / 新玩家注册（会话免密已在第 1 步处理）
+        startAuthFlow(player, session);
+    }
+
+    /** 进入登录/注册流程：查库决定弹登录框还是注册框。 */
+    private void startAuthFlow(Player player, AuthSession session) {
         withFallback(database.findPlayer(player.getUsername()).thenAccept(existing -> {
             StoredPlayer stored = existing.orElse(null);
             if (stored == null || !stored.hasPassword()) {
@@ -662,16 +689,61 @@ public final class AuthManager {
         }), null, "玩家记录查询");
     }
 
-    /** 把玩家送回认证服（未认证玩家绝不能停留在正式服）。 */
-    private void sendToAuthServer(Player player) {
-        server.getServer(config.authServer()).ifPresentOrElse(target ->
+    /** 取玩家当前所在服务器：优先用事件给出的落点，其次才读实时状态。 */
+    private String resolveCurrentServer(Player player, String connectedServer) {
+        if (connectedServer != null && !connectedServer.isEmpty()) {
+            return connectedServer;
+        }
+        return liveServerName(player);
+    }
+
+    /** 实时查询玩家所在服务器名；查不到返回 null。 */
+    private static String liveServerName(Player player) {
+        return player.getCurrentServer().map(conn -> conn.getServerInfo().getName()).orElse(null);
+    }
+
+    /** 该名字是否就是配置里的认证服（大小写不敏感）。 */
+    private boolean isAuthServerName(String serverName) {
+        return serverName != null && serverName.equalsIgnoreCase(config.authServer());
+    }
+
+    /**
+     * 把玩家送回认证服（未认证玩家绝不能停留在正式服）。
+     *
+     * <p>送服前会再核对一次"是不是已经就在认证服上"：若已在那台服上，<b>绝不能</b>再发连接请求
+     * —— Velocity 会以 ALREADY_CONNECTED 拒绝，而这个失败在这里会被当成"认证服不可用"把玩家踢掉。
+     * 这种情况直接进入认证流程（玩家本来就该在那台服上认证）。
+     */
+    private void sendToAuthServer(Player player, AuthSession session, String knownCurrent) {
+        String authServer = config.authServer();
+        if (isAuthServerName(knownCurrent) || isAuthServerName(liveServerName(player))) {
+            logger.warn("[调度] {} 实际已在认证服 '{}' 上，跳过重复送服并直接进入认证流程",
+                    player.getUsername(), authServer);
+            startAuthFlow(player, session);
+            return;
+        }
+        server.getServer(authServer).ifPresentOrElse(target ->
                         player.createConnectionRequest(target).connect().whenComplete((result, throwable) -> {
                             if (throwable != null || result == null || !result.isSuccessful()) {
-                                logger.warn("[调度] {} 送回认证服失败，已断开连接", player.getUsername());
+                                // 必须把真实原因打出来：缺了它排障只能靠猜（线上踩过）
+                                logger.warn("[调度] {} 送回认证服 '{}' 失败（{}），已断开连接",
+                                        player.getUsername(), authServer, failureReason(result, throwable));
                                 player.disconnect(messages.component("kick.auth-error"));
                             }
                         }),
-                () -> logger.error("[调度] 无法送回认证服 '{}'（不存在）", config.authServer()));
+                () -> logger.error("[调度] 无法送回认证服 '{}'（velocity.toml 的 [servers] 中没有它）", authServer));
+    }
+
+    /** 送服失败的原因描述（连接状态或异常），仅用于日志排障。 */
+    private static String failureReason(ConnectionRequestBuilder.Result result, Throwable throwable) {
+        if (throwable != null) {
+            String message = throwable.getMessage();
+            return throwable.getClass().getSimpleName() + (message == null ? "" : ": " + message);
+        }
+        if (result == null) {
+            return "连接请求未返回结果";
+        }
+        return String.valueOf(result.getStatus());
     }
 
     /**
