@@ -247,9 +247,7 @@ class AuthManagerDecisionTest {
 
     @Test
     void dialogDisabledSendsChatUsageInsteadOfDialog() {
-        // dialog.enabled: false 时，落到认证服的离线玩家必须收到聊天栏用法提示，
-        // 且绝不能进入静默态（静默只由对话框下发成功触发；一旦误进，
-        // 该玩家的所有聊天提示都会被丢弃，而又没有任何对话框按钮能解除它）
+        // dialog.enabled: false 时，落到认证服的离线玩家必须收到聊天栏用法提示。
         config = loadConfigWithDialog(false);
         authManager = newAuthManager();
         repository.player = Optional.of(offlineAccount("alice", "hash"));
@@ -258,8 +256,32 @@ class AuthManagerDecisionTest {
         authManager.handleConnected(player, "limbo");
 
         verify(player, times(1)).sendMessage(chatMessageContaining("/login"));
-        verify(player, never()).showTitle(any(net.kyori.adventure.title.Title.class));
+        verify(player, never()).clearTitle();
+        verify(player, never()).hideBossBar(any(net.kyori.adventure.bossbar.BossBar.class));
         assertFalse(repository.audits.isEmpty(), "关掉对话框不影响认证流程本身");
+    }
+
+    @Test
+    void dialogDisabledNeverSuppressesChatMessages() {
+        // 这条才是关闭开关的核心不变量：关闭后**绝不能进入静默态**。
+        // 一旦误进静默（旧的 enterSilent 路径），DisplayManager.chat 会把提示全部丢弃，
+        // 而这时玩家界面上根本没有对话框按钮可以解除静默 —— 玩家只能干等到超时被踢。
+        // 因此这里验证的不是"调了哪个方法"，而是"消息真的发到了玩家手上"。
+        //
+        // Title 必须照常显示（startTracking 的初始 Title + 心跳刷新）：
+        // 关掉对话框后，Title/BossBar 就是唯一的提示通道，被静默掉才是回归。
+        config = loadConfigWithDialog(false);
+        authManager = newAuthManager();
+        repository.player = Optional.of(offlineAccount("alice", "hash"));
+
+        Player player = playerFor("alice");
+        authManager.handleConnected(player, "limbo");
+
+        assertTrue(authManager.isTrackedForDisplay(player.getUniqueId()),
+                "关闭对话框后必须建立 Title/BossBar 跟踪（这是唯一的提示通道）");
+        assertFalse(authManager.isSilentFor(player.getUniqueId()),
+                "开关关闭时绝不能进入静默态，否则所有聊天提示都会被丢弃");
+        verify(player, times(1)).sendMessage(chatMessageContaining("/login"));
     }
 
     @Test

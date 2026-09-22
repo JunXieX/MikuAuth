@@ -1656,6 +1656,17 @@ public final class AuthManager {
         return display.isTracking(playerId);
     }
 
+    /**
+     * 该玩家是否处于静默态（Dialog 打开中，聊天提示被抑制）。
+     *
+     * <p>仅用于测试断言核心不变量：<b>{@code dialog.enabled: false} 时任何玩家都不得进入
+     * 静默态</b>。静默期间 {@code DisplayManager.chat} 会把提示全部丢弃，而此时玩家界面上
+     * 并没有对话框按钮可以解除静默，玩家只能干等到认证超时被踢。
+     */
+    public boolean isSilentFor(UUID playerId) {
+        return display.isSilent(playerId);
+    }
+
     // ---------------------------------------------------------------------
     // 心跳：超时踢出 + 显示刷新
     // ---------------------------------------------------------------------
