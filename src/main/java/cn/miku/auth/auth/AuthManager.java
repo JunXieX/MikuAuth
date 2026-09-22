@@ -151,7 +151,7 @@ public final class AuthManager {
     private final PremiumDecider premium;
     /** 登录审计（旁路记录，失败不影响认证流程）。 */
     private final AuditLogger audit;
-    /** 正版昵称冲突记录文件（玩家只能看到客户端「无效会话」，这里是唯一的事后线索）。 */
+    /** 昵称冲突记录文件（只记"同名冲突被顶下线"；会话校验失败不产生事件，见 logJoinFailure 说明）。 */
     private final PremiumConflictLog conflictLog;
 
     /** 在线玩家会话状态。 */
@@ -321,39 +321,80 @@ public final class AuthManager {
     }
 
     /**
-     * 登录阶段断开的原因分析：结合最近的 PreLogin 决策与断开状态，
-     * 在日志中给出"玩家为什么进不来"的判断（重点：正版会话校验失败、同名冲突）。
+     * 登录阶段断开的原因分析：按 {@link DisconnectEvent.LoginStatus} 给出"玩家为什么进不来"的真实原因。
+     *
+     * <p><b>这里为什么不能下"昵称冲突 / 正版会话校验失败"的结论</b>
+     * （2026-09-22 线上误报修复；结论来自对本地 velocity-proxy 实现的反编译核对，不是推测）：
+     * <ol>
+     *   <li>{@code DisconnectEvent} 只在 {@code LoginEvent} 已触发时才会发出 ——
+     *       {@code PlayerRegistry.fireDisconnectAndCleanup} 以
+     *       {@code player.isLoginEventFired()} 为闸门：未触发就只做连接清理，<b>根本不发事件</b>
+     *       （且此时还没有 {@code ConnectedPlayer}，不存在"断开事件"这一说法）；</li>
+     *   <li>而 {@code LoginEvent} 由 {@code AuthSessionHandler} 在<b>加密握手与会话校验通过之后</b>
+     *       才触发 —— {@code InitialLoginSessionHandler} 先完成 Mojang hasJoined 校验，
+     *       再把<b>已验证的</b> GameProfile 交给 {@code AuthSessionHandler}。</li>
+     * </ol>
+     * 两条合起来：<b>本方法被调用 ⟺ 该连接已经通过会话校验</b>。而"离线客户端冒用正版昵称"
+     * 的失败发生在更早的握手阶段，<b>根本不会产生 DisconnectEvent</b>：玩家只看到客户端原生的
+     * 「无效会话」，服务端连事件都收不到（这类线索只能去代理控制台看 hasJoined 失败）。
+     *
+     * <p>旧实现把"PREMIUM 决策 + 任意非成功状态"直接判为昵称冲突并写入
+     * {@code premium-conflicts.log}，实测该文件 16 条记录 <b>100%</b> 是"进入服务器前断开"
+     * （目标服不可达、玩家选服前退出等正常故障），会把管理员引向 {@code /mikuauth unbind}，
+     * 一旦误对仍有正版账号持有的昵称执行，等于把该昵称开放给任意离线客户端。
+     * 现在改为按状态给出真实原因，并且<b>只有真正能确认昵称被占用的 {@code CONFLICTING_LOGIN}
+     * 才写入冲突记录</b>。
      */
     public void logJoinFailure(String username, DisconnectEvent.LoginStatus status, String ip) {
         ModeRecord record = lastLoginModes.get(MikuConfig.normalize(username));
-        if (record == null || record.mode() == LoginMode.BEDROCK) {
-            return;
+        if (record == null || record.mode() == LoginMode.BEDROCK
+                || status == DisconnectEvent.LoginStatus.SUCCESSFUL_LOGIN) {
+            return; // 基岩版无密码、正常退出已进入服务器：都不属于"进服失败诊断"
         }
-        if (record.mode() == LoginMode.PREMIUM) {
-            // 强制正版校验的昵称：盗版客户端的失败发生在代理内部（无自定义消息），
-            // 这里依据决策记录给出最可能的原因
-            logger.warn("[进服诊断] {} 未能进入（状态: {}）：该昵称已确认为正版，连接被强制正版会话校验，"
-                            + "使用离线/盗版客户端者只会看到客户端原生的\"无效会话\"错误"
-                            + "（该提示由客户端在加密握手阶段自行产生，玩家尚未进入任何服务器，"
-                            + "插件无法投递自定义消息——这是 Minecraft 协议的限制）。"
-                            + "处理方式取决于该昵称是否仍属于某个正版账号："
-                            + "① 仍有效 → 让玩家改用正版启动器登录，或改用其他昵称；"
-                            + "② 已失效（玩家在 Mojang 改名后遗留、记录过期）→ 才可执行 /mikuauth unbind {} 清除绑定。"
-                            + "切勿对\"仍有正版账号持有\"的昵称执行 unbind——那会让任何离线客户端都能占用它。"
-                            + "先执行 /mikuauth diagnose {} 查看三源结论与库中记录再决定。",
-                    username, describeStatus(status), username, username);
-            // ★ 单独落盘：玩家只能看到客户端的「无效会话」，这里是事后唯一能查到的线索
-            conflictLog.record(username, ip, describeStatus(status),
-                    "该昵称已确认为正版（与正版账号 ID 冲突）；详情: /mikuauth diagnose " + username);
-            return;
-        }
-        if (record.mode() == LoginMode.DENIED) {
-            logger.info("[进服诊断] {} 未能进入（状态: {}）：连接被本插件拒绝（fail-closed 或冲突策略）。", username, describeStatus(status));
-            return;
-        }
+
+        // 唯一能确认"昵称被占用"的情形：同名连接已在线，本次连接被顶下线
         if (status == DisconnectEvent.LoginStatus.CONFLICTING_LOGIN) {
-            logger.warn("[进服诊断] {} 未能进入：同名玩家已在线（重复登录冲突）。", username);
+            logger.warn("[进服诊断] {} 未能进入：同名连接已在线，本次连接被顶下线（重复登录冲突）。"
+                            + "若该昵称属于正版账号，请让玩家改用正版启动器登录或更换昵称。",
+                    username);
+            conflictLog.record(username, ip, describeStatus(status),
+                    "同名连接已在线，本次连接被顶下线；详情: /mikuauth diagnose " + username);
+            return;
         }
+
+        if (record.mode() == LoginMode.DENIED) {
+            // 防御性保留：当前 Velocity 版本下 PreLogin 拒绝发生在 LoginEvent 之前，
+            // 因此不会走到这里；若将来版本改为在登录后拒绝，这条日志仍然正确。
+            logger.info("[进服诊断] {} 未能进入（状态: {}）：连接被本插件拒绝（fail-closed 或冲突策略）。",
+                    username, describeStatus(status));
+            return;
+        }
+
+        // 走到这里说明玩家已经通过登录（PREMIUM 记录即"正版会话校验已通过"），
+        // 断开发生在登录之后 —— 与昵称冲突无关，按状态说明真实原因
+        String stage = record.mode() == LoginMode.PREMIUM ? "已通过正版会话校验" : "已通过代理登录";
+        switch (status) {
+            case PRE_SERVER_JOIN -> logger.warn("[进服诊断] {} 未能进入（{}，{}）：在进入第一台服务器前断开。"
+                            + "常见原因：① 目标服（{}）离线或拒绝连接——先看目标服日志；"
+                            + "② 玩家在选服前自行退出；③ 本插件主动断开（如正版 UUID 与库中记录不符）。"
+                            + "这与\"昵称冲突\"无关，请勿据此执行 /mikuauth unbind {}。",
+                    username, describeStatus(status), stage, targetName(), username);
+            case CANCELLED_BY_PROXY -> logger.warn("[进服诊断] {} 未能进入（{}，{}）：连接在注册/选服阶段被代理取消，"
+                            + "常见于同名身份被另一条连接抢占或代理侧拒绝；可用 /mikuauth diagnose {} 核实。",
+                    username, describeStatus(status), stage, username);
+            case CANCELLED_BY_USER, CANCELLED_BY_USER_BEFORE_COMPLETE ->
+                    logger.info("[进服诊断] {} 中断了登录（{}），通常为玩家主动关闭客户端或网络中断。",
+                            username, describeStatus(status));
+            default -> {
+                // SUCCESSFUL_LOGIN 已在开头返回，无其他状态
+            }
+        }
+    }
+
+    /** 免密玩家应去的目标服名（诊断信息用）；未配置 fallback-server 时说明来源。 */
+    private String targetName() {
+        String fallback = config.fallbackServer();
+        return fallback == null || fallback.isBlank() ? "velocity.toml 的 try 列表首项" : fallback;
     }
 
     private static String describeStatus(DisconnectEvent.LoginStatus status) {

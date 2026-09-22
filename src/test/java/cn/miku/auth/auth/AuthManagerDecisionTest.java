@@ -13,6 +13,7 @@ import cn.miku.auth.dialog.DialogService;
 import cn.miku.auth.display.DisplayManager;
 import cn.miku.auth.premium.PremiumService;
 import cn.miku.auth.security.PasswordHasher;
+import com.velocitypowered.api.event.connection.DisconnectEvent;
 import com.velocitypowered.api.proxy.ConnectionRequestBuilder;
 import com.velocitypowered.api.proxy.Player;
 import com.velocitypowered.api.proxy.ProxyServer;
@@ -352,6 +353,78 @@ class AuthManagerDecisionTest {
     }
 
     // ---------------------------------------------------------------------
+    // 进服诊断：断线原因不得误判为"正版昵称冲突"
+    // ---------------------------------------------------------------------
+
+    /**
+     * 登录之后的断线不能被写成"正版昵称冲突"。
+     *
+     * <p><b>回归点（2026-09-22 线上误报）</b>：Velocity 只在 {@code LoginEvent} 触发后才发出
+     * {@code DisconnectEvent}，而 {@code LoginEvent} 是会话校验通过之后才触发的 ——
+     * 也就是说本方法能看到的事件，本身就意味着"会话校验已经过了"。
+     * 旧实现把所有非成功状态都写成"该昵称已确认为正版、会话校验失败"并落到
+     * {@code premium-conflicts.log}，实测该文件 16 条记录 100% 是这类误报
+     * （目标服不可达、玩家选服前退出），会把管理员引去执行 {@code /mikuauth unbind}。
+     */
+    @Test
+    void disconnectAfterLoginIsNotRecordedAsNameConflict() throws IOException {
+        repository.player = Optional.of(premiumAccount("Notch"));
+        authManager.decideLoginModeAsync("Notch", "1.2.3.4").join();
+
+        for (DisconnectEvent.LoginStatus status : List.of(
+                DisconnectEvent.LoginStatus.PRE_SERVER_JOIN,
+                DisconnectEvent.LoginStatus.CANCELLED_BY_PROXY,
+                DisconnectEvent.LoginStatus.CANCELLED_BY_USER,
+                DisconnectEvent.LoginStatus.CANCELLED_BY_USER_BEFORE_COMPLETE)) {
+            authManager.logJoinFailure("Notch", status, "1.2.3.4");
+        }
+        conflictLog.flush();
+
+        assertEquals(List.of(), conflictLogDataLines(),
+                "登录之后的断线（玩家已通过会话校验）与昵称冲突无关，不得写入冲突记录");
+    }
+
+    /** 真正的同名冲突（被顶下线）必须留下记录 —— 这是冲突记录文件唯一的使用场景。 */
+    @Test
+    void duplicateLoginIsRecordedAsNameConflict() throws IOException {
+        repository.player = Optional.of(premiumAccount("Notch"));
+        authManager.decideLoginModeAsync("Notch", "1.2.3.4").join();
+
+        authManager.logJoinFailure("Notch", DisconnectEvent.LoginStatus.CONFLICTING_LOGIN, "1.2.3.4");
+        conflictLog.flush();
+
+        List<String> lines = conflictLogDataLines();
+        assertEquals(1, lines.size(), "同名冲突应写入一条记录，实际: " + lines);
+        assertTrue(lines.get(0).contains("Notch"), "记录里应包含昵称: " + lines.get(0));
+        assertTrue(lines.get(0).contains("同名冲突"), "记录里应写明断开状态: " + lines.get(0));
+    }
+
+    /** 离线玩家（持有密码的普通账号）的同样情形也不得写入冲突记录。 */
+    @Test
+    void offlinePlayerDisconnectIsNotRecordedAsNameConflict() throws IOException {
+        repository.player = Optional.of(offlineAccount("alice", "hash"));
+        authManager.decideLoginModeAsync("alice", "1.2.3.4").join();
+
+        authManager.logJoinFailure("alice", DisconnectEvent.LoginStatus.PRE_SERVER_JOIN, "1.2.3.4");
+        conflictLog.flush();
+
+        assertEquals(List.of(), conflictLogDataLines(), "离线账号的断线与正版昵称冲突无关");
+    }
+
+    /** 没有决策记录（例如插件刚加载完、连接来自更早）、基岩版、正常退出：都不应产生任何诊断输出。 */
+    @Test
+    void unrelatedDisconnectsProduceNoConflictRecord() throws IOException {
+        authManager.logJoinFailure("stranger", DisconnectEvent.LoginStatus.PRE_SERVER_JOIN, "1.2.3.4");
+
+        repository.player = Optional.of(offlineAccount("alice", "hash"));
+        authManager.decideLoginModeAsync("alice", "1.2.3.4").join();
+        authManager.logJoinFailure("alice", DisconnectEvent.LoginStatus.SUCCESSFUL_LOGIN, "1.2.3.4");
+        conflictLog.flush();
+
+        assertEquals(List.of(), conflictLogDataLines());
+    }
+
+    // ---------------------------------------------------------------------
     // 工具
     // ---------------------------------------------------------------------
 
@@ -427,8 +500,16 @@ class AuthManagerDecisionTest {
 
     private ProxyServer proxy;
 
+    /**
+     * 冲突记录器：由测试持有，便于 flush 后断言真实落盘内容
+     * （record 是异步写盘，直接用 mock 断言会漏掉"写没写进文件"这一层）。
+     */
+    private PremiumConflictLog conflictLog;
+
     private AuthManager newAuthManager() {
         proxy = schedulableServer();
+        conflictLog = new PremiumConflictLog(dataDirectory, config,
+                org.slf4j.helpers.NOPLogger.NOP_LOGGER);
         return new AuthManager(new Object(), proxy,
                 org.slf4j.helpers.NOPLogger.NOP_LOGGER,
                 config, messages, repository,
@@ -436,7 +517,24 @@ class AuthManagerDecisionTest {
                 new DialogService(config, messages, org.slf4j.helpers.NOPLogger.NOP_LOGGER),
                 new DisplayManager(config, messages),
                 new AuditLogger(repository, config, org.slf4j.helpers.NOPLogger.NOP_LOGGER),
-                new PremiumConflictLog(dataDirectory, config, org.slf4j.helpers.NOPLogger.NOP_LOGGER));
+                conflictLog);
+    }
+
+    /** 读取冲突记录的数据行（跳过以 # 开头的文件头）；文件不存在时视为空。 */
+    private List<String> conflictLogDataLines() throws IOException {
+        Path file = dataDirectory.resolve(config.premiumConflictLogFile());
+        if (Files.notExists(file)) {
+            return List.of();
+        }
+        return Files.readAllLines(file, StandardCharsets.UTF_8).stream()
+                .filter(line -> !line.isBlank() && !line.startsWith("#"))
+                .toList();
+    }
+
+    private static StoredPlayer premiumAccount(String nickname) {
+        return new StoredPlayer(UUID.randomUUID(), nickname, nickname.toLowerCase(),
+                "$2a$04$0123456789012345678901234567890123456789012345678901",
+                StoredPlayer.TYPE_PREMIUM, "1.2.3.4", 0L, "1.2.3.4", 0L);
     }
 
     private static StoredPlayer offlineAccount(String nickname, String hash) {

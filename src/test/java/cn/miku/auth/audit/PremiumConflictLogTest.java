@@ -15,11 +15,12 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
- * 正版昵称冲突记录文件的测试。
+ * 昵称冲突记录文件的测试。
  *
- * <p>这个文件是"离线客户端占用正版昵称"这一场景下**唯一的事后线索**——
- * 玩家在客户端只看到「无效会话」，服务端无法给出任何提示。因此测试重点是：
- * 该记的记得完整（昵称/IP/状态/说明），不该记的绝不记，且写入永远不抛异常。
+ * <p>本文件记录"同名连接已在线、本次连接被顶下线"（重复登录冲突）的事件。
+ * 注意它<b>不是</b>"离线客户端冒用正版昵称"的线索：那类失败发生在加密握手阶段，
+ * Velocity 在该阶段不产生任何事件（详见 {@code AuthManager#logJoinFailure}）。
+ * 测试重点是：该记的记得完整（昵称/IP/状态/说明），不该记的绝不记，且写入永远不抛异常。
  */
 class PremiumConflictLogTest {
 
@@ -32,15 +33,15 @@ class PremiumConflictLogTest {
         PremiumConflictLog log = new PremiumConflictLog(dataDirectory, config,
                 org.slf4j.helpers.NOPLogger.NOP_LOGGER);
 
-        log.record("JunXieX", "120.40.60.130", "玩家取消", "该昵称已确认为正版");
+        log.record("JunXieX", "120.40.60.130", "同名冲突", "同名连接已在线，本次连接被顶下线");
         log.flush();
 
         String content = Files.readString(dataDirectory.resolve("premium-conflicts.log"),
                 StandardCharsets.UTF_8);
         assertTrue(content.contains("JunXieX"), "昵称必须记录（管理员据此联系玩家）");
         assertTrue(content.contains("120.40.60.130"), "来源 IP 必须记录（据此识别是否为同一人反复尝试）");
-        assertTrue(content.contains("玩家取消"));
-        assertTrue(content.contains("该昵称已确认为正版"));
+        assertTrue(content.contains("同名冲突"));
+        assertTrue(content.contains("同名连接已在线，本次连接被顶下线"));
         assertTrue(content.contains("#"), "文件头应包含成因与处理说明，便于日后翻看无需查代码");
         assertTrue(content.contains("unbind"), "文件头应给出处理方式");
     }

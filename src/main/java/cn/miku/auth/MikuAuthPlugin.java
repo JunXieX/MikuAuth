@@ -72,7 +72,7 @@ public final class MikuAuthPlugin {
      * 插件版本：唯一的版本号来源（{@code pom.xml} 需同步修改）。
      * 同时用于 {@code @Plugin} 注解与对外请求的 User-Agent，避免多处硬编码走样。
      */
-    public static final String VERSION = "2.4.4-Beta";
+    public static final String VERSION = "2.4.5-Beta";
 
     private final ProxyServer server;
     private final Logger logger;
@@ -86,7 +86,7 @@ public final class MikuAuthPlugin {
     private DialogService dialogService;
     private DisplayManager display;
     private AuthManager authManager;
-    /** 正版昵称冲突记录文件（关服时需排空写盘队列）。 */
+    /** 昵称冲突记录文件（记"同名冲突被顶下线"；关服时需排空写盘队列）。 */
     private PremiumConflictLog conflictLog;
     /** 账号迁移器。 */
     private AccountMigrator migrator;
@@ -184,7 +184,7 @@ public final class MikuAuthPlugin {
         display = new DisplayManager(config, messages);
         // 审计记录器：认证流程与迁移器共用同一个实例
         AuditLogger auditLogger = new AuditLogger(database, config, logger);
-        // 正版昵称冲突记录文件（玩家只能看到客户端「无效会话」，此处是唯一事后线索）
+        // 昵称冲突记录文件（记录"同名冲突被顶下线"；会话校验失败的连接不产生事件，不会写到这里）
         conflictLog = new PremiumConflictLog(dataDirectory, config, logger);
         authManager = new AuthManager(this, server, logger, config, messages,
                 database, premiumService, dialogService, display, auditLogger, conflictLog);
@@ -230,8 +230,8 @@ public final class MikuAuthPlugin {
                 config.bedrockAutoLogin() ? "启用" : "禁用",
                 config.authServer());
         if (conflictLog.enabled()) {
-            logger.info("[MikuAuth] 正版昵称冲突记录: {}"
-                            + "（玩家使用正版昵称却被拒时会写入，便于事后核对）",
+            logger.info("[MikuAuth] 昵称冲突记录: {}"
+                            + "（同名连接被顶下线时写入，便于事后核对）",
                     conflictLog.file());
         }
     }
