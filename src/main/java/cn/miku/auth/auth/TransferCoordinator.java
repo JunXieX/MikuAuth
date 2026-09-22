@@ -9,6 +9,7 @@ import com.velocitypowered.api.proxy.ServerConnection;
 import com.velocitypowered.api.proxy.server.RegisteredServer;
 import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.serializer.plain.PlainTextComponentSerializer;
+import net.kyori.adventure.title.Title;
 import org.slf4j.Logger;
 
 import java.time.Duration;
@@ -30,11 +31,20 @@ import java.util.concurrent.ConcurrentHashMap;
  * <p><b>失败分两类处理</b>（2026-09-22 起）：
  * <ol>
  *   <li><b>目标服明确拒绝</b>（{@code Result#getReasonComponent()} 非空，即目标服自己发了
- *       Disconnect 包）：原因原样转发到玩家聊天栏并<b>停止重试</b>——重试只会被同样拒绝，
- *       还会每 5 秒在目标服日志里多刷一次登录记录；</li>
+ *       Disconnect 包）：原因<b>多通道"必达"</b>给玩家（聊天栏 + Title/ActionBar +
+ *       断开画面）并<b>停止重试</b>——重试只会被同样拒绝，还会每 5 秒在目标服日志里多刷一次
+ *       登录记录；</li>
  *   <li><b>连接层面的故障</b>（目标服离线、连接被意外关闭等，没有原因）：保留挂起标记，
  *       由心跳按 {@link #TRANSFER_RETRY_MILLIS} 间隔重试，直到玩家确实离开认证服或断开连接。</li>
  * </ol>
+ *
+ * <p><b>为什么被拒绝时还要主动断开玩家</b>（2026-09-22 线上复现）：
+ * Velocity 对"目标服明确拒绝"走的是 <b>safe</b> 路径
+ * （反编译核对 {@code ConnectionRequestResults.forDisconnect} → {@code safe=true}），
+ * 它<b>不会</b>替玩家发 Disconnect 包；目标服那条连接关掉后，玩家只剩一个空荡荡的认证服。
+ * 此时若客户端的聊天栏恰处在切服/配置阶段、或连接随即被关闭，聊天内容就永远看不到，
+ * 玩家只看到客户端默认的"连接中断"。把完整原因（谁拒的 + 目标服原文 + 处理提示）交给
+ * {@code player.disconnect(...)}，断开画面是唯一"必达"的展示面。
  */
 public final class TransferCoordinator {
 
@@ -187,7 +197,8 @@ public final class TransferCoordinator {
                 return;
             }
             // 目标服主动拒绝时，Velocity 会把它的 Disconnect 包内容放进 Result#getReasonComponent
-            // （ConnectionRequestResults.forDisconnect：status=SERVER_DISCONNECTED，reason=踢出原因）。
+            // （ConnectionRequestResults.forDisconnect：status=SERVER_DISCONNECTED、reason=踢出原因、
+            //  safe=true ⇒ Velocity 不会替玩家发 Disconnect 包）。
             // 这条原因只有插件看得到：玩家此刻还留在认证服，踢出发生在去目标服的那条连接上。
             Optional<Component> reason = result != null ? result.getReasonComponent() : Optional.empty();
             if (reason.isPresent()) {
@@ -205,20 +216,62 @@ public final class TransferCoordinator {
     }
 
     /**
-     * 把目标服的拒绝原因转发给玩家（聊天栏），并留档。
+     * 把目标服的拒绝原因"必达"给玩家，并留档。
      *
-     * <p>玩家坐在认证服里，对"为什么进不去"毫无感知——原因文本原样展示，
-     * 前面加一行说明是哪个服拒的（否则玩家不知道这段话从哪来）。
+     * <p>玩家坐在认证服里，对"为什么进不去"毫无感知——这里走三个通道，保证至少一处可见：
+     * <ol>
+     *   <li>聊天栏（保留原行为）：说明是哪个服拒的 + 原因原文 + 处理提示；</li>
+     *   <li>Title/ActionBar：切服/配置阶段聊天栏可能被吞时的醒目补充；</li>
+     *   <li><b>{@code player.disconnect(完整原因)}（必达兜底）</b>：把完整原因（谁拒的 +
+     *       原因原文 + 处理提示）交给断开画面。玩家已通过认证却进不去目标服，留在认证服里
+     *       没有任何出路，直接断开并给出原因比"干等"更清晰，也彻底杜绝"只看到连接中断"。</li>
+     * </ol>
+     *
+     * <p>通道 1/2 属于"尽力而为"：任何异常都被吞掉，绝不能阻断"必达"的断开兜底。
      */
     private void forwardBackendRejection(Player player, String serverName, Component reason) {
-        player.sendMessage(messages.component("transfer.rejected-header", Map.of("server", serverName)));
-        player.sendMessage(reason);
-        player.sendMessage(messages.component("transfer.rejected-hint"));
+        Component header = messages.component("transfer.rejected-header", Map.of("server", serverName));
+        Component hint = messages.component("transfer.rejected-hint");
+        // 完整原因：谁拒的 + 目标服原文 + 处理提示（断开画面逐行展示）
+        Component full = Component.text()
+                .append(header)
+                .append(Component.newline())
+                .append(reason)
+                .append(Component.newline())
+                .append(hint)
+                .build();
 
         String plain = PlainTextComponentSerializer.plainText().serialize(reason)
                 .replaceAll("\\R+", " | ").trim();
-        logger.warn("[调度] {} 被 {} 拒绝进入：{}（原因已转发给玩家）",
-                player.getUsername(), serverName, plain.isEmpty() ? "（目标服未提供文本）" : plain);
+        // 诊断：转发这一刻玩家在哪台服、连接是否还活着 —— 下次若复现，一眼可定位
+        String currentServer = player.getCurrentServer()
+                .map(connection -> connection.getServerInfo().getName())
+                .orElse("（未连接）");
+        logger.warn("[调度] {} 被 {} 拒绝进入：{}（转发时所在服务器={}，连接 active={}；"
+                        + "原因已转发 Chat/Title 并在断开画面展示）",
+                player.getUsername(), serverName,
+                plain.isEmpty() ? "（目标服未提供文本）" : plain,
+                currentServer, player.isActive());
+
+        // 通道 1/2（尽力而为）：聊天栏 + ActionBar + （启用时）Title
+        try {
+            player.sendMessage(header);
+            player.sendMessage(reason);
+            player.sendMessage(hint);
+            player.sendActionBar(hint);
+            if (config.titleEnabled()) {
+                player.showTitle(Title.title(header, hint, Title.Times.times(
+                        Duration.ofMillis(200), Duration.ofMillis(3000), Duration.ofMillis(500))));
+            }
+        } catch (RuntimeException e) {
+            logger.warn("[调度] {} 的拒绝原因在聊天栏/Title 通道发送失败（{}），改由断开画面兜底",
+                    player.getUsername(), e.getMessage());
+        }
+
+        // 先落审计：backend-kicks.log 是事后排障的唯一线索，绝不能被下面 disconnect 的异常吞掉
         kickLog.record(player.getUsername(), serverName, plain);
+
+        // 通道 3（必达）：断开连接，把完整原因交给断开画面 —— 绝不再让玩家只看到"连接中断"
+        player.disconnect(full);
     }
 }

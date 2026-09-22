@@ -36,6 +36,7 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
@@ -257,11 +258,12 @@ class TransferCoordinatorTest {
     // ---------------------------------------------------------------------
 
     /**
-     * 目标服明确拒绝（Result 带原因）→ 原因原样转发到聊天栏，且不再心跳重试。
+     * 目标服明确拒绝（Result 带原因）→ 原因原样转发到聊天栏，并在断开画面上展示，且不再心跳重试。
      *
      * <p><b>回归点（2026-09-22 线上反馈）</b>：踢出发生在"去目标服的那条连接"上，
-     * 而玩家此刻还留在认证服，游戏里什么都看不到；旧实现只写一行控制台 WARN，
-     * 然后每 5 秒重试一次 —— 玩家永远不知道自己为什么进不去，目标服日志还被反复刷登录记录。
+     * 而玩家此刻还留在认证服。Velocity 对 forDisconnect 走 safe 路径、<b>不会</b>替玩家发
+     * Disconnect 包，于是只发聊天栏的旧实现下，玩家在聊天被吞/连接随即关闭时只看到客户端默认的
+     * "连接中断"，永远不知道原因。修复后必须走"必达"通道：{@code player.disconnect(完整原因)}。
      */
     @Test
     void backendRejectionIsForwardedToPlayerAndNotRetried() throws IOException {
@@ -287,11 +289,52 @@ class TransferCoordinatorTest {
         assertFalse(coordinator.isPending(player.getUniqueId()),
                 "已被明确拒绝时不得再重试（重试只会得到同样的踢出）");
 
+        // 必达通道：断开画面必须带上 目标服名 + 原因原文，否则玩家仍可能"看不到原因"
+        ArgumentCaptor<Component> disconnected = ArgumentCaptor.forClass(Component.class);
+        verify(player).disconnect(disconnected.capture());
+        String screen = PlainTextComponentSerializer.plainText().serialize(disconnected.getValue());
+        assertTrue(screen.contains("sd"), "断开画面必须说明是哪个服务器：" + screen);
+        assertTrue(screen.contains("未绑定社交帐号"), "断开画面必须包含原因原文：" + screen);
+
         kickLog.flush();
         List<String> lines = dataLines("backend-kicks.log");
         assertEquals(1, lines.size(), "应落盘一条记录：" + lines);
         assertTrue(lines.get(0).contains("| sd |"), "记录里应包含目标服名：" + lines.get(0));
         assertTrue(lines.get(0).contains("未绑定社交帐号"), "记录里应包含原因：" + lines.get(0));
+    }
+
+    /**
+     * 聊天栏通道异常时，仍然必须走到 {@code player.disconnect(reason)}。
+     *
+     * <p><b>回归点（"必达"契约）</b>：聊天栏/Title 只是尽力而为的补充通道；万一它们抛异常
+     * （例如连接正处于切服/配置阶段导致写入失败），绝不能连着把"断开画面"这条唯一必达通道
+     * 一起吞掉——否则玩家又回到"只看到连接中断"。
+     */
+    @Test
+    void rejectionReasonIsAlwaysShownOnDisconnectScreenEvenIfChatFails() throws IOException {
+        config = configWith("limbo", "sd");
+        server = immediateScheduler();
+        RegisteredServer sd = registeredServer("sd");
+        when(server.getServer("sd")).thenReturn(Optional.of(sd));
+
+        Player player = playerOn("limbo");
+        stubFailedTransfer(player, sd, failedResult(
+                Component.text("未绑定社交帐号 | junxiesky")));
+        // 模拟聊天栏通道整体不可用
+        doThrow(new RuntimeException("chat channel unavailable"))
+                .when(player).sendMessage(any(Component.class));
+
+        TransferCoordinator coordinator = coordinator();
+        coordinator.schedule(player);
+
+        ArgumentCaptor<Component> disconnected = ArgumentCaptor.forClass(Component.class);
+        verify(player).disconnect(disconnected.capture());
+        String screen = PlainTextComponentSerializer.plainText().serialize(disconnected.getValue());
+        assertTrue(screen.contains("未绑定社交帐号"), "聊天栏失败时断开画面仍必须带原因：" + screen);
+        assertTrue(screen.contains("sd"), "聊天栏失败时断开画面仍必须说明目标服：" + screen);
+
+        // 等待异步落盘完成，避免记录线程在 @TempDir 清理之后才创建文件（Windows 上会报目录非空）
+        kickLog.flush();
     }
 
     /** 连接层面的故障（没有原因，例如目标服离线/连接被意外关闭）→ 保留重试，不打扰玩家。 */
@@ -309,6 +352,7 @@ class TransferCoordinatorTest {
         coordinator.schedule(player);
 
         verify(player, never()).sendMessage(any(Component.class));
+        verify(player, never()).disconnect(any(Component.class));
         assertTrue(coordinator.isPending(player.getUniqueId()),
                 "没有明确原因时应保留挂起标记，交给心跳重试");
 
