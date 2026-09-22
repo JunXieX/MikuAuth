@@ -208,14 +208,31 @@ class PremiumServiceTest {
     }
 
     @Test
-    void offlineResultsAreCached() throws Exception {
+    void authoritativeOfflineResultsAreCached() throws Exception {
+        // 权威源（Mojang 官方 API）的"不存在"是确定结论，做负缓存省掉重复请求
         FakeResolver mojang = new FakeResolver(ResolverConfig.MOJANG,
-                PremiumResolution.offline("mojang", "不存在"), 0, null);
+                PremiumResolution.offline("mojang", "不存在", true), 0, null);
         PremiumService service = new PremiumService(null, List.of(mojang), 5000);
         try {
             assertTrue(await(service, "user1").isOffline());
             assertTrue(await(service, "user1").isOffline());
             assertEquals(1, mojang.calls.get());
+        } finally {
+            service.shutdown();
+        }
+    }
+
+    @Test
+    void mirrorOfflineResultsAreNotCached() throws Exception {
+        // 镜像源的"不存在"可能只是数据滞后（玩家刚改名/刚注册），
+        // 缓存它会把误判窗口放大到整个 TTL，因此不做负缓存
+        FakeResolver mirror = new FakeResolver(ResolverConfig.ASHCON,
+                PremiumResolution.offline("ashcon", "http 404"), 0, null);
+        PremiumService service = new PremiumService(null, List.of(mirror), 5000);
+        try {
+            assertTrue(await(service, "user1").isOffline());
+            assertTrue(await(service, "user1").isOffline());
+            assertEquals(2, mirror.calls.get(), "非权威源的离线结论不应被缓存");
         } finally {
             service.shutdown();
         }

@@ -86,15 +86,21 @@ class LoginThrottleTest {
     }
 
     @Test
-    void successfulLoginResetsCounters() {
+    void successfulLoginResetsAccountCounterButKeepsIpCounter() {
         throttle.recordFailure(IP_A, "Alice");
         throttle.recordFailure(IP_A, "Alice");
         throttle.reset(IP_A, "Alice");
 
-        // 计数已清零，再失败两次仍不应触发（阈值 3）
-        assertNull(throttle.recordFailure(IP_A, "Alice"));
-        assertNull(throttle.recordFailure(IP_A, "Alice"));
-        assertNotNull(throttle.recordFailure(IP_A, "Alice"));
+        // 账号维度已清零：换一个 IP 用同一昵称，重新从 0 开始计数（第 3 次才触发封禁）
+        assertNull(throttle.recordFailure(IP_B, "Alice"));
+        assertNull(throttle.recordFailure(IP_B, "Alice"));
+        assertNotNull(throttle.recordFailure(IP_B, "Alice"));
+
+        // IP 维度**不**被"成功登录"清空：该 IP 上此前已累计 2 次失败，
+        // 因此换昵称再失败一次即达到阈值。这是刻意的——否则攻击者只要用自己一个
+        // 有效账号成功登录一次，就能把该 IP 上"换昵称撞库"的计数一并清零。
+        assertNotNull(throttle.recordFailure(IP_A, "Someone"),
+                "IP 维度的失败计数必须保留（撞库保护）");
     }
 
     @Test

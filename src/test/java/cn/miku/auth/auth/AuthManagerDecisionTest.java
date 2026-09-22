@@ -634,9 +634,11 @@ class AuthManagerDecisionTest {
 
         @Override
         public CompletableFuture<Void> finishLogin(String nickname, String ip, long expiresAtMillis) {
-            // 认证收尾已合并为一次调用：会话到期时间从这里记录（原 saveSession 的职责），
-            // 免密路径传 0（不续期）
-            lastSavedSessionExpiry = expiresAtMillis;
+            // 与真实实现一致：≤0 表示"本次不写会话"（免密路径），此时不得覆盖
+            // 会话续期（renewSessionIfEnabled → saveSession）已经写下的到期时间
+            if (expiresAtMillis > 0) {
+                lastSavedSessionExpiry = expiresAtMillis;
+            }
             return CompletableFuture.completedFuture(null);
         }
 
