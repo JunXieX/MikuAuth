@@ -256,9 +256,9 @@ class AuthManagerDecisionTest {
         authManager.handleConnected(player, "limbo");
 
         verify(player, times(1)).sendMessage(chatMessageContaining("/login"));
-        verify(player, never()).clearTitle();
+        // hideBossBar 只由 enterSilent（对话框成功下发）调用：出现即说明误进了静默态
         verify(player, never()).hideBossBar(any(net.kyori.adventure.bossbar.BossBar.class));
-        assertFalse(repository.audits.isEmpty(), "关掉对话框不影响认证流程本身");
+        assertTrue(authManager.hasSession(player), "关掉对话框不影响认证流程本身");
     }
 
     @Test
@@ -559,11 +559,19 @@ class AuthManagerDecisionTest {
         // bcrypt-cost 取最低值：测试只需验证"哈希被写入且可校验"，
         // 用默认 cost=10 会让每个涉及哈希的用例多花上百毫秒
         // 认证服名字取 limbo，与线上部署保持一致
+        //
+        // audit.enabled 必须显式打开：注意它**不能**靠"缺键回退内置默认值"生效 ——
+        // YamlStore 是"用户层缺键 → 回退内置默认"，但这里的用户文件只写了下面几个键，
+        // 而内置默认文件（/config.yml）本身是有的……所以它本应回退成 true。
+        // 之所以仍然显式写上，是因为本用例要用 repository.audits 断言"认证流程走完了"，
+        // 把依赖藏在"默认值恰好是 true"上会让这条断言在将来改默认值时静默失效。
         Files.writeString(dataDirectory.resolve("config.yml"), """
                 server:
                   auth-server: "limbo"
                 premium:
                   enabled: false
+                audit:
+                  enabled: true
                 login:
                   bcrypt-cost: 4
                 session:
