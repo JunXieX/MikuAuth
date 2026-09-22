@@ -6,6 +6,11 @@ on:
     tags: ["v*"]
   pull_request:
   workflow_dispatch:
+    inputs:
+      modrinth_check:
+        description: "只在 Modrinth 做一次只读校验（检查令牌/项目可达性，不上传任何东西）"
+        type: boolean
+        default: false
 
 jobs:
   build:
@@ -46,3 +51,134 @@ jobs:
           files: target/MikuAuth-*.jar
           prerelease: ${{ contains(github.ref_name, 'Beta') }}
           generate_release_notes: true
+
+      # ------------------------------------------------------------------
+      # Modrinth：只有「正式版」（tag 不含 Beta）才上传；测试版完全跳过。
+      # 幂等：该版本号已存在时直接跳过，重复跑工作流不会产生重复版本。
+      # 想先验证令牌/项目是否可达，可在 Actions 页面手动触发并勾选 modrinth_check。
+      # ------------------------------------------------------------------
+      - name: Publish to Modrinth
+        if: >-
+          (startsWith(github.ref, 'refs/tags/') && !contains(github.ref_name, 'Beta'))
+          || inputs.modrinth_check
+        env:
+          MODRINTH_TOKEN: ${{ secrets.MODRINTH_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+          MODRINTH_CHECK_ONLY: ${{ inputs.modrinth_check }}
+          # 支持的游戏版本（与 Modrinth 项目元数据保持一致）；上游新增 MC 版本时改这一行
+          GAME_VERSIONS: "26.1,26.1.1,26.1.2,26.2,26.3"
+        run: |
+          python3 - <<'PY'
+          import glob, io, json, os, sys, urllib.error, urllib.request, uuid
+
+          try:
+              sys.stdout.reconfigure(encoding='utf-8')
+          except Exception:
+              pass
+
+          API = 'https://api.modrinth.com/v2'
+          # 项目 id（base62）。必须用 id 而不是 slug：项目尚未公开时，用 slug 上传版本会 401
+          PROJECT = 'VKY1fqvo'
+          TOKEN = os.environ['MODRINTH_TOKEN']
+          CHECK_ONLY = (os.environ.get('MODRINTH_CHECK_ONLY') or '').strip().lower() == 'true'
+          TAG = os.environ['TAG']
+          VERSION = TAG.lstrip('v')
+          GAME_VERSIONS = [v for v in (os.environ.get('GAME_VERSIONS') or '').split(',') if v]
+          LOADERS = ['velocity']
+
+
+          def call(method, path, data=None, ctype=None):
+              req = urllib.request.Request(API + path, data=data, method=method)
+              req.add_header('User-Agent', 'MikuMC-Plugin-Dev/1.0')
+              req.add_header('Authorization', TOKEN)
+              if ctype:
+                  req.add_header('Content-Type', ctype)
+              try:
+                  with urllib.request.urlopen(req, timeout=120) as r:
+                      raw = r.read().decode('utf-8')
+                      return r.status, (json.loads(raw) if raw.strip() else {})
+              except urllib.error.HTTPError as e:
+                  return e.code, {'error': e.read().decode('utf-8', 'replace')[:400]}
+
+
+          status, versions = call('GET', '/project/%s/version' % PROJECT)
+          if status != 200:
+              print('读取项目版本失败:', status, versions)
+              sys.exit(1)
+          existing = [v['version_number'] for v in versions]
+          print('项目 %s 现有版本:' % PROJECT, existing or '(空)')
+
+          if CHECK_ONLY:
+              print('[check-only] 只读校验通过：令牌可用、项目可访问、未上传任何内容')
+              sys.exit(0)
+
+          if VERSION in existing:
+              print('[skip] Modrinth 上已存在 %s，跳过上传（幂等）' % VERSION)
+              sys.exit(0)
+
+          # changelog 复用 GitHub Release 正文，避免两处各写一份
+          changelog = 'MikuAuth %s（正式版）' % VERSION
+          try:
+              req = urllib.request.Request(
+                  'https://api.github.com/repos/%s/releases/tags/%s' % (os.environ['REPO'], TAG))
+              req.add_header('User-Agent', 'MikuMC-Plugin-Dev/1.0')
+              req.add_header('Authorization', 'Bearer ' + os.environ['GITHUB_TOKEN'])
+              req.add_header('Accept', 'application/vnd.github+json')
+              with urllib.request.urlopen(req, timeout=60) as r:
+                  body = (json.loads(r.read().decode()) or {}).get('body') or ''
+              if body.strip():
+                  changelog = body
+          except Exception as exc:
+              print('取 GitHub Release 正文失败，改用兜底 changelog:', repr(exc))
+
+          jars = [p for p in glob.glob('target/MikuAuth-*.jar')
+                  if 'original-' not in os.path.basename(p)]
+          if len(jars) != 1:
+              print('期望恰好一个 shade 后的 jar，实际:', jars)
+              sys.exit(1)
+          jar = jars[0]
+          with open(jar, 'rb') as f:
+              content = f.read()
+          filename = os.path.basename(jar)
+
+          data = {
+              'project_id': PROJECT,
+              'name': 'MikuAuth %s' % VERSION,
+              'version_number': VERSION,
+              'changelog': changelog,
+              'version_type': 'release',
+              'game_versions': GAME_VERSIONS,
+              'loaders': LOADERS,
+              'environment': 'server_only',
+              'file_parts': ['file'],
+              'primary_file': 'file',
+              'status': 'listed',
+              'featured': False,
+              'dependencies': [],
+          }
+
+          boundary = '----MikuMC' + uuid.uuid4().hex
+          buf = io.BytesIO()
+          buf.write(('--%s\r\n' % boundary).encode())
+          buf.write(b'Content-Disposition: form-data; name="data"\r\n\r\n')
+          buf.write(json.dumps(data, ensure_ascii=False).encode('utf-8'))
+          buf.write(b'\r\n')
+          buf.write(('--%s\r\n' % boundary).encode())
+          buf.write(('Content-Disposition: form-data; name="file"; filename="%s"\r\n'
+                     % filename).encode())
+          buf.write(b'Content-Type: application/java-archive\r\n\r\n')
+          buf.write(content)
+          buf.write(b'\r\n')
+          buf.write(('--%s--\r\n' % boundary).encode())
+
+          status, resp = call('POST', '/version', buf.getvalue(),
+                              'multipart/form-data; boundary=%s' % boundary)
+          if status in (200, 201):
+              print('已发布到 Modrinth: %s (%s) id=%s' % (
+                  resp.get('version_number'), resp.get('version_type'), resp.get('id')))
+          else:
+              print('上传失败:', status, resp)
+              sys.exit(1)
+          PY
