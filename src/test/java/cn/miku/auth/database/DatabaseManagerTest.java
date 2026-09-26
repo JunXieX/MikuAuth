@@ -1,5 +1,7 @@
 package cn.miku.auth.database;
 
+import cn.miku.auth.audit.AuditAction;
+import cn.miku.auth.audit.AuditEntry;
 import cn.miku.auth.config.MikuConfig;
 import cn.miku.auth.util.UuidUtil;
 import org.junit.jupiter.api.AfterEach;
@@ -9,6 +11,9 @@ import org.junit.jupiter.api.io.TempDir;
 import org.slf4j.LoggerFactory;
 
 import java.nio.file.Path;
+import java.sql.Connection;
+import java.sql.DriverManager;
+import java.sql.PreparedStatement;
 import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
@@ -226,5 +231,41 @@ class DatabaseManagerTest {
         // 清除会话（改密/重置时调用）
         database.clearSession("Alice").get(5, TimeUnit.SECONDS);
         assertTrue(database.findSession("Alice").get(5, TimeUnit.SECONDS).isEmpty());
+    }
+
+    // ---------------------------------------------------------------------
+    // 审计事件解析
+    // ---------------------------------------------------------------------
+
+    /**
+     * 无法识别的 action（降级运行读到新版本写入的值）必须映射为 {@link AuditAction#UNKNOWN}。
+     *
+     * <p>回归点：解析失败曾回退成 {@code ADMIN_ACTION}，而枚举注释与
+     * {@code /mikuauth audit} 的展示都要求这种情况显示为「未知事件」——
+     * 伪装成"管理员操作"会把排障方向带偏（该枚举因此成了永不出现的死值）。
+     */
+    @Test
+    void unknownAuditActionIsReportedAsUnknownNotAdminAction() throws Exception {
+        long now = System.currentTimeMillis();
+        try (Connection connection = DriverManager.getConnection(
+                "jdbc:sqlite:" + tempDir.resolve("database.db").toAbsolutePath());
+             PreparedStatement ps = connection.prepareStatement("""
+                     INSERT INTO miku_audit_log
+                         (nickname, nickname_lower, uuid, ip, action, detail, created_at)
+                     VALUES (?, ?, ?, ?, ?, ?, ?)""")) {
+            ps.setString(1, "Alice");
+            ps.setString(2, "alice");
+            ps.setString(3, null);
+            ps.setString(4, "10.0.0.1");
+            ps.setString(5, "FUTURE_ACTION"); // 当前版本不认识的枚举名（模拟新版本写入）
+            ps.setString(6, null);
+            ps.setLong(7, now);
+            ps.executeUpdate();
+        }
+
+        List<AuditEntry> entries = database.findAuditByNickname("alice", 10).get(5, TimeUnit.SECONDS);
+        assertEquals(1, entries.size(), "应查到刚写入的那条记录");
+        assertEquals(AuditAction.UNKNOWN, entries.get(0).action(),
+                "无法识别的 action 必须显示为「未知事件」，不能伪装成管理员操作");
     }
 }

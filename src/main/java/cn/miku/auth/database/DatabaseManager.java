@@ -935,12 +935,18 @@ public final class DatabaseManager implements AuthRepository, AuditRepository, A
         });
     }
 
-    /** 未知 action（例如降级后读到新版本写入的值）不应让查询整体失败。 */
+    /**
+     * 解析存储的 action 字符串。
+     *
+     * <p>未知值（例如降级后读到新版本写入的值）不应让查询整体失败，映射为
+     * {@link AuditAction#UNKNOWN}（展示为"未知事件"）——<b>不能</b>回退成
+     * {@code ADMIN_ACTION}：把无法识别的记录伪装成"管理员操作"会把排障方向带偏。
+     */
     private static AuditAction parseAction(String raw) {
         try {
             return AuditAction.valueOf(raw);
         } catch (IllegalArgumentException | NullPointerException e) {
-            return AuditAction.ADMIN_ACTION;
+            return AuditAction.UNKNOWN;
         }
     }
 
