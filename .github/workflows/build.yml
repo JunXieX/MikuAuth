@@ -53,6 +53,94 @@ jobs:
           generate_release_notes: true
 
       # ------------------------------------------------------------------
+      # README → Modrinth 项目页：**面向用户的文档只维护 README.md 一份**，
+      # 这里把它的原文同步成 Modrinth 的 body，并把开头两句（英文段+中文段）拼成摘要。
+      # 只在 main 与 tag 上跑（不从特性分支把未定稿的文档推上去），PR 跳过。
+      # 审核期间 Modrinth 会锁编辑，此时只打印警告、不让构建变红。
+      # ------------------------------------------------------------------
+      - name: Sync README to Modrinth
+        if: >-
+          github.event_name != 'pull_request'
+          && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/'))
+        env:
+          MODRINTH_TOKEN: ${{ secrets.MODRINTH_TOKEN }}
+          PROJECT: VKY1fqvo
+        run: |
+          python3 - <<'PY'
+          import json, os, re, sys, urllib.error, urllib.request
+
+          try:
+              sys.stdout.reconfigure(encoding='utf-8')
+          except Exception:
+              pass
+
+          token = (os.environ.get('MODRINTH_TOKEN') or '').strip()
+          if not token:
+              print('未配置 MODRINTH_TOKEN，跳过同步。')
+              sys.exit(0)
+
+          PROJECT = os.environ['PROJECT']
+          API = 'https://api.modrinth.com/v2'
+          with open('README.md', encoding='utf-8') as f:
+              body = f.read().rstrip() + '\n'
+
+          # 摘要 = README 第一个二级标题之前，第一段纯英文 + 第一段含中文，用 ` ｜ ` 连接
+          head = body.split('\n## ', 1)[0]
+          paras = []
+          for raw in re.split(r'\n\s*\n', head):
+              p = ' '.join(l.strip() for l in raw.strip().splitlines() if l.strip())
+              if p and not p.startswith(('#', '- ', '*')):
+                  paras.append(p)
+          cjk = re.compile(r'[\u4e00-\u9fff]')
+          en = next((p for p in paras if not cjk.search(p)), '')
+          zh = next((p for p in paras if cjk.search(p)), '')
+          # 保险：README 开头必须同时有英文段与中文段，否则拒绝同步。
+          # 否则万一仓库里的 README 还是旧的纯中文版，会把项目页已有的英文覆盖掉
+          # （Modrinth 审核硬要求英文），所以这里宁可让步骤失败也不做破坏性写入。
+          if not en or not zh:
+              print('README 开头缺少%s段落，拒绝同步（Modrinth 审核要求摘要/描述含英文）。'
+                    % ('英文' if not en else '中文'))
+              sys.exit(1)
+          desc = '%s ｜ %s' % (en, zh)
+          if len(desc) > 256:
+              print('警告：摘要 %d 字符超限，已截断（请把 README 开头两句写短）' % len(desc))
+              desc = desc[:255] + '…'
+
+          def call(method, path, data=None, ctype=None):
+              req = urllib.request.Request(API + path, data=data, method=method)
+              req.add_header('User-Agent', 'MikuMC-Plugin-Dev/1.0')
+              req.add_header('Authorization', token)
+              if ctype:
+                  req.add_header('Content-Type', ctype)
+              try:
+                  with urllib.request.urlopen(req, timeout=120) as r:
+                      raw = r.read().decode('utf-8')
+                      return r.status, (json.loads(raw) if raw.strip() else {})
+              except urllib.error.HTTPError as e:
+                  return e.code, {'error': e.read().decode('utf-8', 'replace')[:400]}
+
+          st, p = call('GET', '/project/%s' % PROJECT)
+          if st != 200:
+              print('读取项目失败:', st, p)
+              sys.exit(1)
+          if (p.get('body') or '').rstrip() == body.rstrip() and p.get('description') == desc:
+              print('[skip] Modrinth 上的正文与摘要已与 README 一致，无需更新')
+              sys.exit(0)
+
+          data = json.dumps({'description': desc, 'body': body}, ensure_ascii=False).encode()
+          st, resp = call('PATCH', '/project/%s' % PROJECT, data, 'application/json')
+          if st in (200, 204):
+              print('已同步 README → Modrinth（body %d 字符，摘要 %d 字符）' % (len(body), len(desc)))
+              sys.exit(0)
+          if st == 400 and 'validation nags' in str(resp):
+              print('项目正在审核中（status=%s），Modrinth 暂锁编辑；审核结束后重跑本步骤即可。'
+                    % p.get('status'))
+              sys.exit(0)
+          print('同步失败:', st, resp)
+          sys.exit(1)
+          PY
+
+      # ------------------------------------------------------------------
       # Modrinth：只有「正式版」（tag 不含 Beta）才上传；测试版完全跳过。
       # 幂等：该版本号已存在时直接跳过，重复跑工作流不会产生重复版本。
       # 想先验证令牌/项目是否可达，可在 Actions 页面手动触发并勾选 modrinth_check。
