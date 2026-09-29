@@ -213,6 +213,11 @@
                 <version>3.13.0</version>
                 <configuration>
                     <release>25</release>
+                    <!-- 必须固定 fork：JDK 25.0.4 上 maven-compiler-plugin 的进程内编译路径
+                         会触发 javac 内部缺陷（编译测试源时报 "Cannot load from object array
+                         because \"this.hashes\" is null"）；外挂 javac 与 fork 模式均正常，
+                         固定 fork 即绕过（对产物无影响）。 -->
+                    <fork>true</fork>
                     <!-- 调试信息只保留行号与源文件信息：丢掉局部变量表后类文件更小；
                          堆栈里的行号不受影响（仅 IDE 断点查看变量值会失效）。
                          注：Maven 默认还会带一个 -g（全量），javac 以最后出现的 -g 为准。 -->
