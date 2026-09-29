@@ -94,13 +94,13 @@ jobs:
           cjk = re.compile(r'[\u4e00-\u9fff]')
           en = next((p for p in paras if not cjk.search(p)), '')
           zh = next((p for p in paras if cjk.search(p)), '')
-          # 保险：README 开头必须同时有英文段与中文段，否则拒绝同步。
-          # 否则万一仓库里的 README 还是旧的纯中文版，会把项目页已有的英文覆盖掉
-          # （Modrinth 审核硬要求英文），所以这里宁可让步骤失败也不做破坏性写入。
+          # 保险：README 开头必须同时有英文段与中文段才同步，缺一则跳过本次同步（告警但不失败）——
+          # 绝不把纯中文内容覆盖到项目页（Modrinth 审核硬要求摘要/描述含英文）；
+          # 跳过只影响项目页文案，不让构建变红（README 为中文文档，属预期状态）。
           if not en or not zh:
-              print('README 开头缺少%s段落，拒绝同步（Modrinth 审核要求摘要/描述含英文）。'
+              print('[skip] README 开头缺少%s段落，本次不同步（Modrinth 审核要求摘要/描述含英文）。'
                     % ('英文' if not en else '中文'))
-              sys.exit(1)
+              sys.exit(0)
           desc = '%s ｜ %s' % (en, zh)
           if len(desc) > 256:
               print('警告：摘要 %d 字符超限，已截断（请把 README 开头两句写短）' % len(desc))
