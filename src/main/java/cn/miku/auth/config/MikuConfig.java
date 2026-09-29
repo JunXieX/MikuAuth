@@ -5,6 +5,7 @@ import java.nio.file.Path;
 import java.util.List;
 import java.util.Locale;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import org.slf4j.Logger;
 
 /**
@@ -25,6 +26,9 @@ public final class MikuConfig {
 
     /** 最近一次加载使用的日志器（配置值类型异常时用于告警；未加载时为 null）。 */
     private volatile Logger logger;
+
+    /** 已告警过的钳制项：同一配置项只提示一次，避免热路径反复刷屏。 */
+    private final Set<String> clampWarned = ConcurrentHashMap.newKeySet();
 
     /** 命令别名缓存：命令拦截是热路径，且别名只在 reload 时变化。 */
     private volatile List<String> loginAliases = List.of("l", "log");
@@ -114,7 +118,7 @@ public final class MikuConfig {
 
     /** 上游 API 请求超时（毫秒）。 */
     public int premiumTimeoutMillis() {
-        return clamp(getInt("premium.timeout-millis", 5000), 300, 30000);
+        return clampValue("premium.timeout-millis", getInt("premium.timeout-millis", 5000), 300, 30000);
     }
 
     /** 正版命中结果缓存时长（分钟），0 = 不缓存。 */
@@ -170,7 +174,7 @@ public final class MikuConfig {
 
     /** 登录后会话时长（分钟），期间同 IP 再次进入免密。 */
     public int sessionDurationMinutes() {
-        return clamp(getInt("session.duration-minutes", 60), 1, 10080);
+        return clampValue("session.duration-minutes", getInt("session.duration-minutes", 60), 1, 10080);
     }
 
     /**
@@ -194,12 +198,12 @@ public final class MikuConfig {
 
     /** 审计日志保留天数；0 = 永久保留。 */
     public int auditRetainDays() {
-        return clamp(getInt("audit.retain-days", 30), 0, 3650);
+        return clampValue("audit.retain-days", getInt("audit.retain-days", 30), 0, 3650);
     }
 
     /** 单次查询返回的最大条数（/mikuauth audit）。 */
     public int auditQueryLimit() {
-        return clamp(getInt("audit.query-limit", 20), 1, 200);
+        return clampValue("audit.query-limit", getInt("audit.query-limit", 20), 1, 200);
     }
 
     /**
@@ -255,12 +259,14 @@ public final class MikuConfig {
 
     /** 密码最小长度。 */
     public int minPasswordLength() {
-        return clamp(getInt("registration.min-password-length", 6), 1, 64);
+        return clampValue("registration.min-password-length",
+                getInt("registration.min-password-length", 6), 1, 64);
     }
 
     /** 密码最大长度。 */
     public int maxPasswordLength() {
-        return clamp(getInt("registration.max-password-length", 32), 1, 128);
+        return clampValue("registration.max-password-length",
+                getInt("registration.max-password-length", 32), 1, 128);
     }
 
     /** 每 IP 可注册的账号上限；0 = 不限制。运行时可用 /mikuauth limit 临时覆盖。 */
@@ -290,7 +296,7 @@ public final class MikuConfig {
 
     /** BCrypt 成本因子。 */
     public int bcryptCost() {
-        return clamp(getInt("login.bcrypt-cost", 10), 4, 31);
+        return clampValue("login.bcrypt-cost", getInt("login.bcrypt-cost", 10), 4, 31);
     }
 
     // ---------------------------------------------------------------------
@@ -316,7 +322,7 @@ public final class MikuConfig {
 
     /** 延迟多久再弹对话框（毫秒）：避开子服 Join Game 包竞争。 */
     public int dialogShowDelayMillis() {
-        return clamp(getInt("dialog.show-delay-millis", 700), 0, 10000);
+        return clampValue("dialog.show-delay-millis", getInt("dialog.show-delay-millis", 700), 0, 10000);
     }
 
     // ---------------------------------------------------------------------
@@ -358,7 +364,7 @@ public final class MikuConfig {
     }
 
     public int mariaDbPort() {
-        return clamp(getInt(networkDbPath("port"), 3306), 1, 65535);
+        return clampValue(networkDbPath("port"), getInt(networkDbPath("port"), 3306), 1, 65535);
     }
 
     public String mariaDbDatabase() {
@@ -375,12 +381,13 @@ public final class MikuConfig {
 
     /** 连接池大小：同时决定数据库操作的并发线程数。 */
     public int mariaDbPoolSize() {
-        return clamp(getInt(networkDbPath("pool-size"), 6), 2, 32);
+        return clampValue(networkDbPath("pool-size"), getInt(networkDbPath("pool-size"), 6), 2, 32);
     }
 
     /** 获取连接的超时（毫秒）。 */
     public int mariaDbConnectionTimeoutMillis() {
-        return clamp(getInt(networkDbPath("connection-timeout-millis"), 5000), 500, 60000);
+        return clampValue(networkDbPath("connection-timeout-millis"),
+                getInt(networkDbPath("connection-timeout-millis"), 5000), 500, 60000);
     }
 
     /** TLS 模式：disable / trust / verify-ca / verify-full（默认 disable，内网直连）。 */
@@ -446,12 +453,13 @@ public final class MikuConfig {
 
     /** 失败计数窗口（分钟）：窗口内未再失败则计数清零。 */
     public int securityFailureWindowMinutes() {
-        return clamp(getInt("security.failure-window-minutes", 15), 1, 1440);
+        return clampValue("security.failure-window-minutes",
+                getInt("security.failure-window-minutes", 15), 1, 1440);
     }
 
     /** 触发后的封禁时长（分钟）。 */
     public int securityLockoutMinutes() {
-        return clamp(getInt("security.lockout-minutes", 5), 1, 1440);
+        return clampValue("security.lockout-minutes", getInt("security.lockout-minutes", 5), 1, 1440);
     }
 
     // ---------------------------------------------------------------------
@@ -525,8 +533,17 @@ public final class MikuConfig {
         return def;
     }
 
-    private static int clamp(int value, int min, int max) {
-        return Math.max(min, Math.min(max, value));
+    /**
+     * 解析后钳制：越界时压回安全区间，并<b>按项只告警一次</b> ——
+     * 让服主知道配置被调整过、以及被调整成了多少（静默钳制会让人误以为配置已生效）。
+     */
+    private int clampValue(String path, int value, int min, int max) {
+        int clamped = Math.max(min, Math.min(max, value));
+        if (clamped != value && logger != null && clampWarned.add(path)) {
+            logger.warn("[配置] {} = {} 超出允许范围 [{}, {}]，已按 {} 使用",
+                    path, value, min, max, clamped);
+        }
+        return clamped;
     }
 
     /** 归一化昵称（统一小写比较）。 */

@@ -2,6 +2,7 @@ package cn.miku.auth.config;
 
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.slf4j.Logger;
 import org.yaml.snakeyaml.LoaderOptions;
 import org.yaml.snakeyaml.Yaml;
 import org.yaml.snakeyaml.constructor.SafeConstructor;
@@ -18,6 +19,8 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.mockingDetails;
 
 /**
  * 配置与语言文件测试：默认文件复制、嵌套键查找、缺键回退、数值钳制、别名读取，
@@ -214,6 +217,37 @@ class ConfigAndMessagesTest {
         config.load(tempDir, null);
         assertTrue(config.autoReturnOnFallback(), "无法解析的布尔字符串应回退默认值 true（不得静默成 false）");
         assertFalse(config.premiumFailClosed(), "合法字符串布尔值（\"false\"）应正常解析");
+    }
+
+    @Test
+    void outOfRangeNumbersAreClampedWithOneTimeWarning() throws Exception {
+        // 回归点：越界值应被钳制到安全区间，且"钳制告警"按项只出现一次 ——
+        // 此前是静默钳制，服主不知道配置被调整过、也不知道被调成了多少
+        Files.writeString(tempDir.resolve("config.yml"), """
+                premium:
+                  timeout-millis: 1
+                """, StandardCharsets.UTF_8);
+        Logger logger = mock(Logger.class);
+        MikuConfig config = new MikuConfig();
+        config.load(tempDir, logger);
+
+        // 反复读取：钳制结果稳定，告警不重复
+        for (int i = 0; i < 3; i++) {
+            assertEquals(300, config.premiumTimeoutMillis());
+        }
+        assertEquals(1, warnCallsContaining(logger, "premium.timeout-millis"),
+                "同一配置项的钳制告警只应出现一次");
+    }
+
+    /** 统计 logger 的 warn 调用中（含 varargs 数组展开）出现指定片段的次数。 */
+    private static long warnCallsContaining(Logger logger, String fragment) {
+        return mockingDetails(logger).getInvocations().stream()
+                .filter(invocation -> invocation.getMethod().getName().equals("warn"))
+                .filter(invocation -> java.util.Arrays.stream(invocation.getArguments())
+                        .anyMatch(arg -> arg instanceof Object[] array
+                                ? java.util.Arrays.asList(array).contains(fragment)
+                                : fragment.equals(arg)))
+                .count();
     }
 
     @Test
