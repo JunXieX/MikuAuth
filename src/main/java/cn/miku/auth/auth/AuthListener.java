@@ -27,7 +27,7 @@ import org.slf4j.Logger;
 /**
  * Velocity 事件入口：把代理事件接入认证状态机。
  *
- * <p>事件顺序参考：
+ * <p>事件顺序为：
  * PreLoginEvent → GameProfileRequestEvent → LoginEvent → PostLoginEvent
  * → PlayerChooseInitialServerEvent → ServerPreConnectEvent → ServerConnectedEvent。
  */
@@ -156,8 +156,8 @@ public final class AuthListener {
         Player player = event.getPlayer();
         AuthManager.LoginMode mode = authManager.lastLoginModeFor(player.getUsername());
         boolean bypassLimbo = (mode == AuthManager.LoginMode.PREMIUM)
-                || (mode == AuthManager.LoginMode.BEDROCK && config.bedrockAutoLogin())
-                || authManager.isSessionVerifiedFor(player.getUsername());
+                || authManager.isBedrockPlayer(player.getUniqueId())
+                || authManager.isSessionVerifiedFor(player.getUsername(), remoteIp(player));
         if (bypassLimbo) {
             RegisteredServer target = authManager.resolvePostAuthTarget();
             if (target != null) {

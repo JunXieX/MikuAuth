@@ -240,14 +240,25 @@ final class ConfigUpdater {
      * 截断成半个文件，而此时"原文件备份"只存在于<b>首次</b>修改之前。
      */
     private static void writeAtomically(Path file, String content) throws IOException {
-        Path temp = file.resolveSibling(file.getFileName() + ".tmp");
-        Files.writeString(temp, content, StandardCharsets.UTF_8);
+        // 临时名唯一化：多个代理实例共用一个配置目录时，固定 .tmp 会让彼此覆盖
+        Path temp = file.resolveSibling(
+                file.getFileName() + "." + ProcessHandle.current().pid() + ".tmp");
         try {
-            Files.move(temp, file, java.nio.file.StandardCopyOption.REPLACE_EXISTING,
-                    java.nio.file.StandardCopyOption.ATOMIC_MOVE);
-        } catch (IOException atomicUnsupported) {
-            // 个别文件系统不支持原子改名：退回普通覆盖，但仍避免"写到一半"
-            Files.move(temp, file, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+            Files.writeString(temp, content, StandardCharsets.UTF_8);
+            try {
+                Files.move(temp, file, java.nio.file.StandardCopyOption.REPLACE_EXISTING,
+                        java.nio.file.StandardCopyOption.ATOMIC_MOVE);
+            } catch (IOException atomicUnsupported) {
+                // 个别文件系统不支持原子改名：退回普通覆盖，但仍避免"写到一半"
+                Files.move(temp, file, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+            }
+        } catch (IOException e) {
+            try {
+                Files.deleteIfExists(temp);
+            } catch (IOException ignored) {
+                // 清理失败不影响原始异常
+            }
+            throw e;
         }
     }
 

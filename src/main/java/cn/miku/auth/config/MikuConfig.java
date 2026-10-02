@@ -46,6 +46,9 @@ public final class MikuConfig {
      */
     public void load(Path dataDirectory, Logger logger) throws IOException {
         this.logger = logger;
+        // 每次加载都重置"已告警"集合：否则第一次越界提示过后，服主改完配置 reload 回来
+        // 即使仍然越界也不会再提示——问题被静默吞掉，而这套提示存在的意义正是暴露误配
+        clampWarned.clear();
         store.load(dataDirectory.resolve("config.yml"), DEFAULT_RESOURCE, logger);
 
         if (logger != null) {
@@ -154,10 +157,8 @@ public final class MikuConfig {
         return getBoolean("bedrock.auto-login", true);
     }
 
-    /** Floodgate 用户名前缀兜底值（实际前缀以 Floodgate API 为准）。 */
-    public String bedrockPrefix() {
-        return getString("bedrock.username-prefix", ".");
-    }
+    // 基岩版身份只由 Floodgate 的在线注册表判定（见 BedrockDetector），
+    // 不接受任何"昵称前缀"式的自报依据，因此这里不提供前缀配置项
 
     // ---------------------------------------------------------------------
     // 会话（同 IP 免密）
@@ -263,10 +264,18 @@ public final class MikuConfig {
                 getInt("registration.min-password-length", 6), 1, 64);
     }
 
-    /** 密码最大长度。 */
+    /**
+     * 密码最大长度。
+     *
+     * <p>同时兜住"min > max"的错配：这里保证上限不低于下限，使至少有一个长度可用。
+     * 否则两组配置各自合法、合起来却让<b>任何</b>密码都通不过校验，而错误提示会指向
+     * "密码长度不符"，管理员很难反推到配置项上（交叉校验的告警见 {@code validateAndWarn}）。
+     */
     public int maxPasswordLength() {
-        return clampValue("registration.max-password-length",
+        int max = clampValue("registration.max-password-length",
                 getInt("registration.max-password-length", 32), 1, 128);
+        int min = minPasswordLength();
+        return Math.max(max, min);
     }
 
     /** 每 IP 可注册的账号上限；0 = 不限制。运行时可用 /mikuauth limit 临时覆盖。 */
@@ -294,9 +303,15 @@ public final class MikuConfig {
         return Math.max(0, getInt("login.timeout-seconds", 60));
     }
 
-    /** BCrypt 成本因子。 */
+    /**
+     * BCrypt 成本因子。
+     *
+     * <p>范围收在 8~16：下限 8 是"登录压力大时仍可接受"的最低位（出厂配置注释也建议
+     * 最多降到 8~9）；上限 16 已经远超常规需求，再高只是把 CPU 锁死——cost=31 相当于
+     * 每次校验耗掉天文数字的算力，等于自己给自己造成拒绝服务。
+     */
     public int bcryptCost() {
-        return clampValue("login.bcrypt-cost", getInt("login.bcrypt-cost", 10), 4, 31);
+        return clampValue("login.bcrypt-cost", getInt("login.bcrypt-cost", 10), 8, 16);
     }
 
     // ---------------------------------------------------------------------
@@ -432,6 +447,17 @@ public final class MikuConfig {
                 Set.of("pink", "blue", "red", "green", "yellow", "purple", "white"));
         warnIfUnknownEnum(logger, "display.bossbar-overlay", bossBarOverlay(),
                 Set.of("progress", "notched_6", "notched_10", "notched_12", "notched_20"));
+        // 密码长度上下限交叉校验：两组值各自都在合法区间内，单看钳制日志看不出问题，
+        // 但 min > max 时没有密码能同时满足两者——玩家注册不了、也改不了密码
+        int rawMin = clampValue("registration.min-password-length",
+                getInt("registration.min-password-length", 6), 1, 64);
+        int rawMax = clampValue("registration.max-password-length",
+                getInt("registration.max-password-length", 32), 1, 128);
+        if (rawMin > rawMax) {
+            logger.warn("[配置] registration.min-password-length ({}) 大于 max-password-length ({})，"
+                    + "没有密码能同时满足两者；运行时已把上限抬到 {} 以保证至少有一个可用长度，请修正配置",
+                    rawMin, rawMax, rawMin);
+        }
     }
 
     /** 取值不在允许集合内时告警（解析侧仍按默认值继续）。 */

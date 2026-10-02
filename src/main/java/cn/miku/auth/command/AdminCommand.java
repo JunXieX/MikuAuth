@@ -120,7 +120,7 @@ public final class AdminCommand implements SimpleCommand {
                 })
                 .exceptionally(throwable -> {
                     invocation.source().sendMessage(plugin.messages()
-                            .prefixed("admin.error", Map.of("reason", String.valueOf(throwable.getMessage()))));
+                            .prefixed("admin.error", Map.of("reason", sanitizeFailure(throwable))));
                     return null;
                 });
     }
@@ -159,12 +159,12 @@ public final class AdminCommand implements SimpleCommand {
                     .exceptionally(throwable -> {
                         plugin.logger().error("[管理] 账号查询失败: {}", throwable.toString());
                         source.sendMessage(plugin.messages().prefixed("admin.error",
-                                Map.of("reason", String.valueOf(throwable.getMessage()))));
+                                Map.of("reason", sanitizeFailure(throwable))));
                         return null;
                     });
         }).exceptionally(throwable -> {
             source.sendMessage(plugin.messages().prefixed("admin.error",
-                    Map.of("reason", String.valueOf(throwable.getMessage()))));
+                    Map.of("reason", sanitizeFailure(throwable))));
             return null;
         });
     }
@@ -208,7 +208,7 @@ public final class AdminCommand implements SimpleCommand {
             }
         }).exceptionally(throwable -> {
             source.sendMessage(plugin.messages().prefixed("admin.error",
-                    Map.of("reason", String.valueOf(throwable.getMessage()))));
+                    Map.of("reason", sanitizeFailure(throwable))));
             return null;
         });
     }
@@ -231,7 +231,7 @@ public final class AdminCommand implements SimpleCommand {
             }
         }).exceptionally(throwable -> {
             source.sendMessage(plugin.messages().prefixed("admin.error",
-                    Map.of("reason", String.valueOf(throwable.getMessage()))));
+                    Map.of("reason", sanitizeFailure(throwable))));
             return null;
         });
     }
@@ -282,7 +282,7 @@ public final class AdminCommand implements SimpleCommand {
             }
         }).exceptionally(throwable -> {
             source.sendMessage(plugin.messages().prefixed("admin.error",
-                    Map.of("reason", String.valueOf(throwable.getMessage()))));
+                    Map.of("reason", sanitizeFailure(throwable))));
             return null;
         });
     }
@@ -338,7 +338,7 @@ public final class AdminCommand implements SimpleCommand {
             }
         }).exceptionally(throwable -> {
             source.sendMessage(plugin.messages().prefixed("admin.error",
-                    Map.of("reason", String.valueOf(throwable.getMessage()))));
+                    Map.of("reason", sanitizeFailure(throwable))));
             return null;
         });
     }

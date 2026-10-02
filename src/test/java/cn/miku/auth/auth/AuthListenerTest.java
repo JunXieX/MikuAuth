@@ -121,7 +121,7 @@ class AuthListenerTest {
         when(event.getPlayer()).thenReturn(player);
         when(player.getUsername()).thenReturn("Alex");
         when(authManager.lastLoginModeFor("Alex")).thenReturn(AuthManager.LoginMode.OFFLINE);
-        when(authManager.isSessionVerifiedFor("Alex")).thenReturn(false);
+        when(authManager.isSessionVerifiedFor("Alex", null)).thenReturn(false);
         when(server.getServer("auth")).thenReturn(Optional.of(authServer));
 
         listener.onChooseInitialServer(event);

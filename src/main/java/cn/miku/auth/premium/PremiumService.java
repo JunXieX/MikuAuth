@@ -60,6 +60,14 @@ public final class PremiumService {
     private static final int MAX_IN_FLIGHT_QUERIES = 32;
     /** 外部查询线程池的队列上限（配合 AbortPolicy，拒绝路径已有兜底）。 */
     private static final int QUEUE_CAPACITY = 256;
+    /**
+     * 单来源 IP 的在途查询上限。
+     *
+     * <p>全局上限只能限制总量：单个来源用"不重复的合法昵称"批量建连照样能把配额吃满，
+     * 而配额一满、fail-closed 生效，所有正常玩家（含正版）都会被以"无法验证"拒掉——
+     * 等于一个来源就能造成全局可用性打击。因此按来源单独设一个远小于全局的上限。
+     */
+    private static final int PER_IP_IN_FLIGHT_LIMIT = 4;
     /** 权威源 ID（Mojang）。 */
     private static final String AUTHORITATIVE = "mojang";
 
@@ -78,6 +86,8 @@ public final class PremiumService {
     private final ConcurrentHashMap<String, CompletableFuture<PremiumResolution>> inFlight = new ConcurrentHashMap<>();
     /** 在途查询数（准入控制用）。 */
     private final AtomicInteger inFlightCount = new AtomicInteger();
+    /** 按来源 IP 的在途查询数（准入控制用；条目归零即移除，避免随独立 IP 数增长）。 */
+    private final ConcurrentHashMap<String, AtomicInteger> inFlightByIp = new ConcurrentHashMap<>();
     /** 配置代次：reload 后自增，用于丢弃"旧配置下发起"的查询结果，避免写回缓存。 */
     private final AtomicLong generation = new AtomicLong();
     /** 外部查询线程池：只跑叶子网络任务，不做编排。 */
@@ -157,8 +167,11 @@ public final class PremiumService {
     /**
      * 异步解析昵称的正版状态。
      * 无任何启用源时直接返回 UNKNOWN，不做网络请求。
+     *
+     * @param ip 本次连接的来源 IP，用于按来源限流；为 null 时只受全局上限约束
+     *           （诊断等非连接路径没有来源 IP）
      */
-    public CompletableFuture<PremiumResolution> resolveAsync(String username) {
+    public CompletableFuture<PremiumResolution> resolveAsync(String username, String ip) {
         if (!hasResolvers()) {
             return CompletableFuture.completedFuture(
                     PremiumResolution.unknown("service", "未启用验证源"));
@@ -193,6 +206,21 @@ public final class PremiumService {
                     PremiumResolution.unknown("service", "并发查询过载"));
         }
 
+        // 2b. 按来源 IP 的准入控制：全局上限只限制总量，挡不住单个来源把配额吃满
+        //     （占满后 fail-closed 会连正常玩家一起拒掉）。这里给每个来源单独设限。
+        String ipKey = ip == null || ip.isEmpty() ? null : ip;
+        if (ipKey != null) {
+            AtomicInteger perIp = inFlightByIp.get(ipKey);
+            if (perIp != null && perIp.get() >= PER_IP_IN_FLIGHT_LIMIT) {
+                if (logger != null) {
+                    logger.warn("[正版验证] 来源 {} 的并发查询达到上限 {}（疑似批量建连刷量），本次按无法判定处理: {}",
+                            ipKey, PER_IP_IN_FLIGHT_LIMIT, username);
+                }
+                return CompletableFuture.completedFuture(
+                        PremiumResolution.unknown("service", "来源并发查询过载"));
+            }
+        }
+
         // 3. 单飞合并并发请求：
         //    必须"先占位、后发起"——先建 future 再 putIfAbsent 会让落败方也已经发出 3 个请求，
         //    结果却被丢弃（既重复外发，也与"合并为一次查询"的承诺不符）。
@@ -200,18 +228,36 @@ public final class PremiumService {
         long startedGeneration = generation.get();
         CompletableFuture<PremiumResolution> future = inFlight.computeIfAbsent(key, ignored -> {
             created.set(true);
+            // 额度在映射函数内递增：只有真正发起查询的那一次才占额度，
+            // 合并进他人查询的连接既不占额度、也不需要在完成时释放
+            if (ipKey != null) {
+                inFlightByIp.computeIfAbsent(ipKey, ignoredIp -> new AtomicInteger()).incrementAndGet();
+            }
             return startQuery(username);
         });
         if (created.get()) {
             future.whenComplete((result, throwable) -> {
                 inFlight.remove(key);
                 inFlightCount.decrementAndGet();
+                if (ipKey != null) {
+                    releaseIpSlot(ipKey);
+                }
                 if (throwable == null && result != null && startedGeneration == generation.get()) {
                     cacheResult(key, result);
                 }
             });
         }
         return future;
+    }
+
+    /**
+     * 释放一个来源 IP 的并发额度。
+     *
+     * <p>归零时把条目一并移除：否则每个来过的 IP 都会留下一个计数为 0 的条目，
+     * 长期运行下随独立 IP 数无限增长。
+     */
+    private void releaseIpSlot(String ip) {
+        inFlightByIp.computeIfPresent(ip, (key, counter) -> counter.decrementAndGet() <= 0 ? null : counter);
     }
 
     /**

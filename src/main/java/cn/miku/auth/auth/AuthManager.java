@@ -159,13 +159,29 @@ public final class AuthManager {
     /** 本次连接内已完成认证的玩家（防止认证完成后被送出时重复触发认证流程）。 */
     private final java.util.Set<UUID> authenticated = java.util.concurrent.ConcurrentHashMap.newKeySet();
     /**
-     * PreLogin 阶段判定"会话免密有效"的昵称 → 判定时间戳。
+     * PreLogin 阶段判定"会话免密有效"的昵称 → 判定记录（来源 IP + 时间戳）。
      *
      * <p>作用：初始调度据此让离线玩家<b>直连目标服</b>（跳过认证服），
-     * 连接建立后由 {@link #handleConnected(Player)} 消费（用后即删）。
-     * 带时间戳是为了清理未真正建立连接的残留（客户端取消、连接中断等）。
+     * 连接建立后由 {@link #handleConnected(Player, String)} 消费（用后即删）。
+     *
+     * <p><b>为什么必须记住来源 IP</b>：离线模式下昵称就是身份，任何知道昵称的人都能建连。
+     * 若标记只按昵称记忆，同昵称的他人连接就能"捡走"这条标记直接免密进入别人的账号——
+     * 判定阶段比对过 IP，消费阶段却不再比对，等于白判。因此标记带上判定时的 IP，
+     * 消费时必须由<b>同一个 IP</b>发起才放行。
      */
-    private final ConcurrentHashMap<String, Long> sessionVerifiedNames = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<String, Mark> sessionVerifiedNames = new ConcurrentHashMap<>();
+
+    /** 会话免密标记的有效期：超过即视为残留（客户端取消、连接中断等）并清理。 */
+    private static final long SESSION_MARK_TTL_MILLIS = 60_000L;
+
+    /**
+     * 一条会话免密标记。
+     *
+     * @param ip       判定通过时的来源 IP（消费时必须一致）
+     * @param markedAt 判定时刻，用于按时间清理残留
+     */
+    private record Mark(String ip, long markedAt) {
+    }
     /** 未认证命令提示节流（毫秒）。 */
     private static final long DENY_NOTICE_THROTTLE_MILLIS = 3000;
     /** BCrypt 计算线程数：cost=10 时单次约 60~100ms，2 线程已可满足常规规模。 */
@@ -237,7 +253,7 @@ public final class AuthManager {
         purgeStaleExpectations();
         // 1) 基岩版昵称检测（Floodgate 在加密握手阶段已注册玩家）
         if (config.bedrockAutoLogin()
-                && BedrockDetector.isBedrockUsername(username, config.bedrockPrefix(), logger)) {
+                && BedrockDetector.isBedrockUsername(username, logger)) {
             recordBedrockDecision(username);
             return CompletableFuture.completedFuture(ModeDecision.of(LoginMode.BEDROCK));
         }
@@ -259,7 +275,7 @@ public final class AuthManager {
                 return resolveOfflineDecisionAsync(username, ip);
             }
             // 未注册 / 已删除密码 → 正版查询
-            return decideForUnknownAsync(username);
+            return decideForUnknownAsync(username, ip);
         }).thenApply(decision -> {
             recordLoginMode(username, decision.mode());
             return decision;
@@ -278,16 +294,44 @@ public final class AuthManager {
         }
         return withFallback(database.findSession(username).thenApply(session -> {
             if (session.isPresent() && ip.equals(session.get().ip())) {
-                sessionVerifiedNames.put(MikuConfig.normalize(username), System.currentTimeMillis());
+                sessionVerifiedNames.put(MikuConfig.normalize(username),
+                        new Mark(ip, System.currentTimeMillis()));
                 logger.debug("[调度] {} 的会话有效（IP 一致），本次直连目标服", username);
             }
             return ModeDecision.of(LoginMode.OFFLINE);
         }), ModeDecision.of(LoginMode.OFFLINE), "会话免密判定");
     }
 
-    /** 该昵称本次连接是否已通过会话免密判定（初始调度用）。 */
-    public boolean isSessionVerifiedFor(String username) {
-        return sessionVerifiedNames.containsKey(MikuConfig.normalize(username));
+    /**
+     * 该昵称的会话免密标记是否属于本次连接（初始调度用）。
+     *
+     * <p>必须连同来源 IP 一起比对：标记按昵称存放，只查"键存在"会让同昵称的他人连接
+     * 也命中，从而被调度到目标服并免密进入别人的账号。
+     *
+     * @param ip 本次连接的来源 IP；与判定时不一致即视为未通过
+     */
+    public boolean isSessionVerifiedFor(String username, String ip) {
+        Mark mark = sessionVerifiedNames.get(MikuConfig.normalize(username));
+        return mark != null && mark.ip().equals(ip);
+    }
+
+    /**
+     * 消费会话免密标记：仅当"本次连接的来源 IP 与判定时一致"才放行并删除。
+     *
+     * <p>用 {@code computeIfPresent} 而非"先 get 再 remove"：并发下两次连接可能同时读到
+     * 同一条标记，条件式删除保证只有一个能真正消费；IP 不匹配时<b>保留</b>标记——
+     * 它多半属于另一个 IP 的合法连接，不能顺手删掉。
+     */
+    private boolean consumeSessionMark(String username, String ip) {
+        java.util.concurrent.atomic.AtomicBoolean matched = new java.util.concurrent.atomic.AtomicBoolean();
+        sessionVerifiedNames.computeIfPresent(MikuConfig.normalize(username), (key, mark) -> {
+            if (mark.ip().equals(ip)) {
+                matched.set(true);
+                return null; // 消费掉
+            }
+            return mark;
+        });
+        return matched.get();
     }
 
     private void recordLoginMode(String username, LoginMode mode) {
@@ -296,22 +340,14 @@ public final class AuthManager {
     }
 
     /**
-     * 记录基岩版决策：同时覆盖<b>带前缀</b>与<b>无前缀</b>两种昵称形态。
+     * 记录基岩版决策。
      *
-     * <p>PreLogin 阶段的昵称与连接后的最终昵称可能相差一个 Floodgate 前缀
-     * （如 "junxiesky" vs ".junxiesky"）——若只记录单一形态，
-     * 认证/调度阶段将查询不到决策，导致基岩玩家被误按离线处理并误入 limbo。
+     * <p>不再衍生"带前缀/无前缀"的多种昵称形态：基岩身份完全由 Floodgate 在线注册表
+     * 按 UUID 判定（见 {@link BedrockDetector#isBedrockPlayer}），调度侧也改为查 UUID，
+     * 昵称形态不再参与任何判定。
      */
     private void recordBedrockDecision(String username) {
-        String live = BedrockDetector.getLivePrefix(config.bedrockPrefix(), logger);
-        String stripped = username.startsWith(live)
-                ? username.substring(live.length())
-                : username;
         recordLoginMode(username, LoginMode.BEDROCK);
-        recordLoginMode(stripped, LoginMode.BEDROCK);
-        if (!live.isEmpty()) {
-            recordLoginMode(live + stripped, LoginMode.BEDROCK);
-        }
     }
 
     /** 读取昵称最近一次 PreLogin 决策（初始调度用）；无记录返回 null。 */
@@ -428,7 +464,7 @@ public final class AuthManager {
         String player = nickname;
         return database.findPlayer(nickname).thenCompose(existing ->
                 premium.available()
-                        ? premium.resolveAsync(nickname).thenApply(res -> buildReport(player, existing.orElse(null), res))
+                        ? premium.resolveAsync(nickname, null).thenApply(res -> buildReport(player, existing.orElse(null), res))
                         : CompletableFuture.completedFuture(
                         buildReport(player, existing.orElse(null), null)));
     }
@@ -483,11 +519,11 @@ public final class AuthManager {
     }
 
     /** 未注册昵称的正版判定。 */
-    private CompletableFuture<ModeDecision> decideForUnknownAsync(String username) {
+    private CompletableFuture<ModeDecision> decideForUnknownAsync(String username, String ip) {
         if (!premium.available()) {
             return CompletableFuture.completedFuture(ModeDecision.of(LoginMode.OFFLINE));
         }
-        return premium.resolveAsync(username).thenCompose(resolution -> {
+        return premium.resolveAsync(username, ip).thenCompose(resolution -> {
             if (!config.autoMigrateRenamed()) {
                 return CompletableFuture.completedFuture(applyResolution(username, resolution));
             }
@@ -637,13 +673,17 @@ public final class AuthManager {
         if (!pendingPasswordInputs.isEmpty()) {
             pendingPasswordInputs.values().removeIf(pending -> pending.expireAt() < now);
         }
-        if (lastLoginModes.size() < 64 && sessionVerifiedNames.size() < 64) {
+        // 会话免密标记必须按时间过期，不能像 lastLoginModes 那样"表满才清"：
+        // 它是一张免密通行证，客户端取消连接后残留的那条在小服上可能长期不失效。
+        if (!sessionVerifiedNames.isEmpty()) {
+            long markCutoff = now - SESSION_MARK_TTL_MILLIS;
+            sessionVerifiedNames.values().removeIf(mark -> mark.markedAt() < markCutoff);
+        }
+        if (lastLoginModes.size() < 64) {
             return;
         }
         long cutoff = now - 60_000L;
         lastLoginModes.values().removeIf(record -> record.createdAt() < cutoff);
-        // 会话免密标记未被消费（客户端取消/连接中断）时在此过期，避免残留
-        sessionVerifiedNames.values().removeIf(markedAt -> markedAt < cutoff);
     }
 
     // ---------------------------------------------------------------------
@@ -710,8 +750,9 @@ public final class AuthManager {
                 mode != null ? mode : "未知（按离线处理）");
 
         // 1) 会话免密直连：PreLogin 阶段已判定同 IP 会话有效，初始调度直接跳过认证服，
-        //    因此这里无需再查库，消费标记即可放行（用后即删）
-        if (sessionVerifiedNames.remove(MikuConfig.normalize(player.getUsername())) != null) {
+        //    因此这里无需再查库，消费标记即可放行（用后即删）。
+        //    ★ 必须复核来源 IP：标记按昵称存放，只按昵称删除会让同昵称的他人连接捡走它
+        if (consumeSessionMark(player.getUsername(), ip)) {
             logger.info("[会话免密] {} 的会话有效（PreLogin 已判定），免密直连目标服", player.getUsername());
             renewSessionIfEnabled(player, session);
             completeAuth(player, session, "auth.auto.session", false);
@@ -737,8 +778,10 @@ public final class AuthManager {
         //      就以 XUID 完成了身份绑定，服务端没有可被冒用的"昵称"概念，
         //      因此这里既不需要登记账号，也不需要纳入 IP 配额（与正版账号同理）。
         //      副作用：/mikuauth accounts 查不到基岩版玩家，属预期行为。
+        //    判定只认 Floodgate 注册表（见 BedrockDetector.isBedrockUsername）：
+        //    昵称前缀是客户端可自报的串，不能当身份凭据，所以这里也不再走 || 短路
         if (config.bedrockAutoLogin()
-                && (mode == LoginMode.BEDROCK || BedrockDetector.isBedrockPlayer(player.getUniqueId()))) {
+                && BedrockDetector.isBedrockPlayer(player.getUniqueId())) {
             logger.debug("[认证] {} 基岩版免密通过", player.getUsername());
             completeAuth(player, session, "auth.auto.bedrock", false);
             return;
@@ -1118,7 +1161,7 @@ public final class AuthManager {
             return;
         }
         session.conflictChecked = true;
-        premium.resolveAsync(session.username).thenAccept(resolution ->
+        premium.resolveAsync(session.username, session.ip).thenAccept(resolution ->
                 session.premiumConflict = resolution.isPremium());
     }
 
@@ -1688,10 +1731,36 @@ public final class AuthManager {
     // 状态查询与命令拦截
     // ---------------------------------------------------------------------
 
-    /** 玩家是否已通过认证（或根本不需要认证）。 */
+    /**
+     * 玩家是否已通过认证。
+     *
+     * <p>两个来源取并集，缺一不可：
+     * <ul>
+     *   <li>{@link #authenticated}：认证完成后 {@code completeAuth} 会<b>移除</b>会话，
+     *       只留这个标记，因此它才是"已认证"的主要依据；</li>
+     *   <li>{@code session.allowed}：会话仍在且已放行的短暂阶段。</li>
+     * </ul>
+     *
+     * <p>旧实现写的是"无会话即放行"（{@code session == null || session.allowed}）。
+     * 正常路径下无会话确实等于已认证，但会话被清理、异常竞态等情形同样会落到"无会话"，
+     * 那时未认证玩家会被误放行——这道闸门因此收成只认显式证据的 fail-closed 语义。
+     */
     public boolean isAllowed(Player player) {
-        AuthSession session = sessions.get(player.getUniqueId());
-        return session == null || session.allowed;
+        return isAuthenticated(player.getUniqueId());
+    }
+
+    /** 该连接是否已完成认证（只认显式证据，不靠"无会话"这种间接推断）。 */
+    public boolean isAuthenticated(UUID playerId) {
+        if (authenticated.contains(playerId)) {
+            return true;
+        }
+        AuthSession session = sessions.get(playerId);
+        return session != null && session.allowed;
+    }
+
+    /** 该连接是否属于基岩版玩家（只信 Floodgate 注册表，绝不看昵称形态）。 */
+    public boolean isBedrockPlayer(UUID playerId) {
+        return config.bedrockAutoLogin() && BedrockDetector.isBedrockPlayer(playerId);
     }
 
     /** 玩家是否已有认证会话（进入认证服只处理一次）。 */

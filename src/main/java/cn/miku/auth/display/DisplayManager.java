@@ -105,7 +105,13 @@ public final class DisplayManager {
         TrackedDisplay display = new TrackedDisplay(
                 createBossBar(textKey, bossBarPlaceholders, timeoutSeconds > 0),
                 deadline, textKey, dynamic);
-        tracked.put(player.getUniqueId(), display);
+        // 覆盖旧条目时必须先撤掉它的 BossBar：否则重新进入认证流程时（例如超时被踢后
+        // 重连、或后端关闭被送回认证服）旧 Bar 会留在玩家界面上，而引用已被丢弃——
+        // 此后再没有任何代码能隐藏它，玩家会一直挂着一个过期的倒计时
+        TrackedDisplay previous = tracked.put(player.getUniqueId(), display);
+        if (previous != null && previous.bossBar != display.bossBar) {
+            player.hideBossBar(previous.bossBar);
+        }
         if (config.bossBarEnabled()) {
             player.showBossBar(display.bossBar);
         }

@@ -97,7 +97,7 @@ class AuthManagerDecisionTest {
         AuthManager.ModeDecision decision = authManager.decideLoginModeAsync("alice", "1.2.3.4").join();
 
         assertEquals(AuthManager.LoginMode.OFFLINE, decision.mode(), "会话免密玩家仍按离线模式放行");
-        assertTrue(authManager.isSessionVerifiedFor("alice"),
+        assertTrue(authManager.isSessionVerifiedFor("alice", "1.2.3.4"),
                 "同 IP 会话有效时必须打上免密标记，初始调度据此直连目标服");
     }
 
@@ -108,7 +108,7 @@ class AuthManagerDecisionTest {
 
         authManager.decideLoginModeAsync("alice", "1.2.3.4").join();
 
-        assertFalse(authManager.isSessionVerifiedFor("alice"),
+        assertFalse(authManager.isSessionVerifiedFor("alice", "1.2.3.4"),
                 "IP 不一致时不得免密（会话的唯一维度就是 IP）");
     }
 
@@ -119,7 +119,7 @@ class AuthManagerDecisionTest {
 
         authManager.decideLoginModeAsync("alice", "1.2.3.4").join();
 
-        assertFalse(authManager.isSessionVerifiedFor("alice"));
+        assertFalse(authManager.isSessionVerifiedFor("alice", "1.2.3.4"));
     }
 
     @Test
@@ -131,7 +131,7 @@ class AuthManagerDecisionTest {
 
         authManager.decideLoginModeAsync("alice", "1.2.3.4").join();
 
-        assertFalse(authManager.isSessionVerifiedFor("alice"), "session.enabled=false 时不应判定会话");
+        assertFalse(authManager.isSessionVerifiedFor("alice", "1.2.3.4"), "session.enabled=false 时不应判定会话");
     }
 
     @Test
@@ -142,7 +142,7 @@ class AuthManagerDecisionTest {
         AuthManager.ModeDecision decision = authManager.decideLoginModeAsync("alice", null).join();
 
         assertEquals(AuthManager.LoginMode.OFFLINE, decision.mode());
-        assertFalse(authManager.isSessionVerifiedFor("alice"), "取不到来源 IP 时必须保守处理");
+        assertFalse(authManager.isSessionVerifiedFor("alice", "1.2.3.4"), "取不到来源 IP 时必须保守处理");
     }
 
     @Test
@@ -153,8 +153,8 @@ class AuthManagerDecisionTest {
         authManager.decideLoginModeAsync("Alice", "1.2.3.4").join();
 
         // 大小写不同的昵称应命中同一标记（内部统一归一化）
-        assertTrue(authManager.isSessionVerifiedFor("alice"));
-        assertTrue(authManager.isSessionVerifiedFor("ALICE"));
+        assertTrue(authManager.isSessionVerifiedFor("alice", "1.2.3.4"));
+        assertTrue(authManager.isSessionVerifiedFor("ALICE", "1.2.3.4"));
     }
 
     // ---------------------------------------------------------------------
@@ -171,7 +171,7 @@ class AuthManagerDecisionTest {
 
         assertEquals(AuthManager.LoginMode.PREMIUM, decision.mode(),
                 "已登记的正版账号应强制正版会话校验（不查 API）");
-        assertFalse(authManager.isSessionVerifiedFor("Notch"), "正版路径不涉及会话免密");
+        assertFalse(authManager.isSessionVerifiedFor("Notch", "1.2.3.4"), "正版路径不涉及会话免密");
     }
 
     @Test
@@ -181,7 +181,7 @@ class AuthManagerDecisionTest {
         AuthManager.ModeDecision decision = authManager.decideLoginModeAsync("newcomer", "1.2.3.4").join();
 
         assertEquals(AuthManager.LoginMode.OFFLINE, decision.mode());
-        assertFalse(authManager.isSessionVerifiedFor("newcomer"),
+        assertFalse(authManager.isSessionVerifiedFor("newcomer", "1.2.3.4"),
                 "未注册玩家没有会话可言，必须进认证服注册");
     }
 
@@ -194,7 +194,7 @@ class AuthManagerDecisionTest {
 
         authManager.decideLoginModeAsync("alice", "1.2.3.4").join();
 
-        assertFalse(authManager.isSessionVerifiedFor("alice"),
+        assertFalse(authManager.isSessionVerifiedFor("alice", "1.2.3.4"),
                 "无密码记录不享有会话免密（没有可免密保护的凭据）");
     }
 
@@ -241,7 +241,7 @@ class AuthManagerDecisionTest {
         authManager.decideLoginModeAsync("alice", "1.2.3.4").join();
         authManager.handleConnected(playerFor("alice"));
 
-        assertFalse(authManager.isSessionVerifiedFor("alice"), "标记用后即删，避免影响后续连接");
+        assertFalse(authManager.isSessionVerifiedFor("alice", "1.2.3.4"), "标记用后即删，避免影响后续连接");
     }
 
     // ---------------------------------------------------------------------

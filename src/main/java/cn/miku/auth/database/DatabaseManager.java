@@ -268,14 +268,41 @@ public final class DatabaseManager implements AuthRepository, AuditRepository, A
     public CompletableFuture<RegisterResult> registerWithIpLimit(UUID uuid, String nickname, String passwordHash,
                                                                 String authType, String ip, int maxAccounts) {
         return supply(connection -> {
+            if (maxAccounts <= 0) {
+                // 不限额时无需事务：省掉一次提交往返
+                try {
+                    return insertPlayer(connection, uuid, nickname, passwordHash, authType, ip);
+                } catch (SQLException e) {
+                    logger.error("[数据库] 注册 {} 失败: {}", nickname, e.getMessage());
+                    return RegisterResult.ERROR;
+                }
+            }
+            boolean originalAutoCommit = connection.getAutoCommit();
             try {
-                if (maxAccounts > 0 && countAccountsByIp(connection, ip) >= maxAccounts) {
+                // "判定 + 写入"必须落在同一个事务里：两条语句各自提交时，MariaDB 多连接下
+                // 两个同 IP 的并发注册都能读到未含对方的旧计数，双双通过检查（配额被突破）
+                connection.setAutoCommit(false);
+                if (countAccountsByIp(connection, ip) >= maxAccounts) {
+                    connection.rollback();
                     return RegisterResult.IP_LIMIT;
                 }
-                return insertPlayer(connection, uuid, nickname, passwordHash, authType, ip);
+                RegisterResult result = insertPlayer(connection, uuid, nickname, passwordHash, authType, ip);
+                connection.commit();
+                return result;
             } catch (SQLException e) {
+                try {
+                    connection.rollback();
+                } catch (SQLException ignored) {
+                    // 回滚失败不影响返回结果（连接即将归还）
+                }
                 logger.error("[数据库] 注册 {} 失败: {}", nickname, e.getMessage());
                 return RegisterResult.ERROR;
+            } finally {
+                try {
+                    connection.setAutoCommit(originalAutoCommit);
+                } catch (SQLException ignored) {
+                    // 恢复失败不影响返回结果
+                }
             }
         });
     }
@@ -283,11 +310,15 @@ public final class DatabaseManager implements AuthRepository, AuditRepository, A
     /** 配额统计（注册路径专用：复用同一个连接，避免"判定与写入不是同一时刻"）。 */
     private static int countAccountsByIp(Connection connection, String ip) throws SQLException {
         try (PreparedStatement ps = connection.prepareStatement("""
-                SELECT COUNT(DISTINCT nickname_lower) FROM miku_players
-                WHERE (register_ip = ? OR last_login_ip = ?) AND auth_type <> ?""")) {
+                SELECT COUNT(*) FROM (
+                    SELECT nickname_lower FROM miku_players WHERE register_ip = ? AND auth_type <> ?
+                    UNION
+                    SELECT nickname_lower FROM miku_players WHERE last_login_ip = ? AND auth_type <> ?
+                )""")) {
             ps.setString(1, ip);
-            ps.setString(2, ip);
-            ps.setString(3, StoredPlayer.TYPE_PREMIUM);
+            ps.setString(2, StoredPlayer.TYPE_PREMIUM);
+            ps.setString(3, ip);
+            ps.setString(4, StoredPlayer.TYPE_PREMIUM);
             try (ResultSet rs = ps.executeQuery()) {
                 return rs.next() ? rs.getInt(1) : 0;
             }
@@ -453,24 +484,46 @@ public final class DatabaseManager implements AuthRepository, AuditRepository, A
         return supply(connection -> {
             String normalized = MikuConfig.normalize(nickname);
             String displayName;
-            try (PreparedStatement ps = connection.prepareStatement(
-                    "SELECT display_name FROM miku_players WHERE nickname_lower = ? AND auth_type = ?")) {
-                ps.setString(1, normalized);
-                ps.setString(2, StoredPlayer.TYPE_PREMIUM);
-                try (ResultSet rs = ps.executeQuery()) {
-                    if (!rs.next()) {
-                        return false;
+            boolean originalAutoCommit = connection.getAutoCommit();
+            try {
+                // SELECT 与 UPDATE 放进同一事务：否则两次操作之间该行可能被改名或解绑，
+                // 读到的 displayName 与实际被改的行不对应，算出的离线 UUID 会指错身份
+                connection.setAutoCommit(false);
+                try (PreparedStatement ps = connection.prepareStatement(
+                        "SELECT display_name FROM miku_players WHERE nickname_lower = ? AND auth_type = ?")) {
+                    ps.setString(1, normalized);
+                    ps.setString(2, StoredPlayer.TYPE_PREMIUM);
+                    try (ResultSet rs = ps.executeQuery()) {
+                        if (!rs.next()) {
+                            connection.rollback();
+                            return false;
+                        }
+                        displayName = rs.getString(1);
                     }
-                    displayName = rs.getString(1);
                 }
-            }
-            try (PreparedStatement ps = connection.prepareStatement(
-                    "UPDATE miku_players SET auth_type = ?, uuid = ? WHERE nickname_lower = ? AND auth_type = ?")) {
-                ps.setString(1, StoredPlayer.TYPE_OFFLINE);
-                ps.setString(2, UuidUtil.format(UuidUtil.offlineUuid(displayName)));
-                ps.setString(3, normalized);
-                ps.setString(4, StoredPlayer.TYPE_PREMIUM);
-                return ps.executeUpdate() > 0;
+                try (PreparedStatement ps = connection.prepareStatement(
+                        "UPDATE miku_players SET auth_type = ?, uuid = ? WHERE nickname_lower = ? AND auth_type = ?")) {
+                    ps.setString(1, StoredPlayer.TYPE_OFFLINE);
+                    ps.setString(2, UuidUtil.format(UuidUtil.offlineUuid(displayName)));
+                    ps.setString(3, normalized);
+                    ps.setString(4, StoredPlayer.TYPE_PREMIUM);
+                    boolean updated = ps.executeUpdate() > 0;
+                    connection.commit();
+                    return updated;
+                }
+            } catch (SQLException e) {
+                try {
+                    connection.rollback();
+                } catch (SQLException ignored) {
+                    // 回滚失败不影响原始异常
+                }
+                throw e;
+            } finally {
+                try {
+                    connection.setAutoCommit(originalAutoCommit);
+                } catch (SQLException ignored) {
+                    // 恢复失败不影响返回结果
+                }
             }
         });
     }
@@ -488,23 +541,44 @@ public final class DatabaseManager implements AuthRepository, AuditRepository, A
     public CompletableFuture<Void> finishLogin(String nickname, String ip, long expiresAtMillis) {
         return supply(connection -> {
             String normalized = MikuConfig.normalize(nickname);
-            if (expiresAtMillis > 0) {
-                try (PreparedStatement ps = connection.prepareStatement(backend.upsertSessionSql())) {
-                    ps.setString(1, normalized);
-                    ps.setString(2, ip);
-                    ps.setLong(3, expiresAtMillis);
+            boolean originalAutoCommit = connection.getAutoCommit();
+            try {
+                // 会话写入与最近登录记录必须是同一笔：分开提交时可能出现"会话已续期、
+                // 但最近登录时间没更新"的半完成状态（同 IP 免密的判定依赖会话行，
+                // 而管理排查依赖最近登录，两者不一致会让排障结论失真）
+                connection.setAutoCommit(false);
+                if (expiresAtMillis > 0) {
+                    try (PreparedStatement ps = connection.prepareStatement(backend.upsertSessionSql())) {
+                        ps.setString(1, normalized);
+                        ps.setString(2, ip);
+                        ps.setLong(3, expiresAtMillis);
+                        ps.executeUpdate();
+                    }
+                }
+                try (PreparedStatement ps = connection.prepareStatement(
+                        "UPDATE miku_players SET last_login_ip = ?, last_login_time = ? "
+                                + "WHERE nickname_lower = ?")) {
+                    ps.setString(1, ip);
+                    ps.setLong(2, System.currentTimeMillis());
+                    ps.setString(3, normalized);
                     ps.executeUpdate();
                 }
+                connection.commit();
+                return null;
+            } catch (SQLException e) {
+                try {
+                    connection.rollback();
+                } catch (SQLException ignored) {
+                    // 回滚失败不影响原始异常
+                }
+                throw e;
+            } finally {
+                try {
+                    connection.setAutoCommit(originalAutoCommit);
+                } catch (SQLException ignored) {
+                    // 恢复失败不影响返回结果
+                }
             }
-            try (PreparedStatement ps = connection.prepareStatement(
-                    "UPDATE miku_players SET last_login_ip = ?, last_login_time = ? "
-                            + "WHERE nickname_lower = ?")) {
-                ps.setString(1, ip);
-                ps.setLong(2, System.currentTimeMillis());
-                ps.setString(3, normalized);
-                ps.executeUpdate();
-            }
-            return null;
         });
     }
 
@@ -517,11 +591,15 @@ public final class DatabaseManager implements AuthRepository, AuditRepository, A
     public CompletableFuture<Integer> countAccountsByIp(String ip) {
         return supply(connection -> {
             try (PreparedStatement ps = connection.prepareStatement("""
-                    SELECT COUNT(DISTINCT nickname_lower) FROM miku_players
-                    WHERE (register_ip = ? OR last_login_ip = ?) AND auth_type <> ?""")) {
+                    SELECT COUNT(*) FROM (
+                        SELECT nickname_lower FROM miku_players WHERE register_ip = ? AND auth_type <> ?
+                        UNION
+                        SELECT nickname_lower FROM miku_players WHERE last_login_ip = ? AND auth_type <> ?
+                    )""")) {
                 ps.setString(1, ip);
-                ps.setString(2, ip);
-                ps.setString(3, StoredPlayer.TYPE_PREMIUM);
+                ps.setString(2, StoredPlayer.TYPE_PREMIUM);
+                ps.setString(3, ip);
+                ps.setString(4, StoredPlayer.TYPE_PREMIUM);
                 try (ResultSet rs = ps.executeQuery()) {
                     return rs.next() ? rs.getInt(1) : 0;
                 }
@@ -597,8 +675,15 @@ public final class DatabaseManager implements AuthRepository, AuditRepository, A
 
     /** 单批清理行数：把一次大删除摊成多批，避免长时间占住唯一的工作线程。 */
     private static final int PURGE_BATCH_SIZE = 500;
-    /** 单次清理最多执行多少批（剩下的留给下一次心跳，避免清理任务长期占用工作线程）。 */
-    private static final int PURGE_MAX_BATCHES = 20;
+    /**
+     * 单次清理最多执行多少批（剩下的留给下一次心跳，避免清理任务长期占用工作线程）。
+     *
+     * <p>取 60 而非 20：上限 20 时每 5 分钟只能清 1 万行——会话窗口最长 7 天，
+     * 一旦积压超过这个量（长期停服后重启、或曾把窗口调得很大），清理就永远追不上，
+     * 过期的会话行会一直留在表里。每批只有 500 行、走索引，60 批仍是毫秒级，
+     * 对唯一工作线程的占用有上界。
+     */
+    private static final int PURGE_MAX_BATCHES = 60;
 
     /** 清理全部过期会话，返回删除行数（分批执行）。 */
     public CompletableFuture<Integer> purgeExpiredSessions() {
@@ -703,10 +788,13 @@ public final class DatabaseManager implements AuthRepository, AuditRepository, A
             }
         }
 
+        // 中间表名带随机后缀：多个代理实例共享同一个 MariaDB、又恰好同时执行旧库升级时，
+        // 固定名字会让它们互相删掉/覆盖对方正在写入的表，迁移结果不可预期
+        String migrating = requireSafeIdentifier(
+                "miku_players_migrating_" + Long.toHexString(System.nanoTime()));
         boolean originalAutoCommit = connection.getAutoCommit();
         try {
             connection.setAutoCommit(false);
-            String migrating = requireSafeIdentifier("miku_players_migrating");
             try (Statement statement = connection.createStatement()) {
                 statement.executeUpdate("DROP TABLE IF EXISTS " + migrating);
                 statement.executeUpdate(backend.playersDdl(migrating));
@@ -748,6 +836,8 @@ public final class DatabaseManager implements AuthRepository, AuditRepository, A
             } catch (SQLException ignored) {
                 // 回滚失败时保留原始异常更有价值
             }
+            // MySQL 家族的 DDL 会隐式提交：中间表清不干净会留下垃圾表，这里尽力移除
+            dropQuietly(connection, migrating);
             throw e;
         } finally {
             try {
@@ -755,6 +845,20 @@ public final class DatabaseManager implements AuthRepository, AuditRepository, A
             } catch (SQLException ignored) {
                 // 恢复失败不影响迁移结果
             }
+        }
+    }
+
+    /**
+     * 尽力删除中间表（迁移失败后的清理）。
+     *
+     * <p>MySQL 家族的 DDL 会隐式提交，"回滚"清不掉已创建的中间表，必须显式删；
+     * 清理本身失败不影响原始异常上抛——那才是管理员需要看到的信息。
+     */
+    private static void dropQuietly(Connection connection, String table) {
+        try (Statement statement = connection.createStatement()) {
+            statement.executeUpdate("DROP TABLE IF EXISTS " + table);
+        } catch (SQLException ignored) {
+            // 清理失败不影响原始异常
         }
     }
 

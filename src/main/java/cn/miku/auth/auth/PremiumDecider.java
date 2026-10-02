@@ -73,9 +73,11 @@ public final class PremiumDecider {
      *
      * <p>仅在 {@link #available()} 为真时有意义；调用方需自行处理"未启用"的情形。
      * 查询失败由 {@link PremiumResolution} 表达（{@code allFailed}），不抛异常。
+     *
+     * @param ip 本次连接的来源 IP，透传给服务层用于按来源限流
      */
-    public CompletableFuture<PremiumResolution> resolveAsync(String username) {
-        return premiumService.resolveAsync(username);
+    public CompletableFuture<PremiumResolution> resolveAsync(String username, String ip) {
+        return premiumService.resolveAsync(username, ip);
     }
 
     // ---------------------------------------------------------------------

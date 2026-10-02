@@ -27,30 +27,6 @@ public final class BedrockDetector {
     }
 
     /**
-     * 获取 Floodgate 的实际用户名前缀；Floodgate 不可用时返回兜底值。
-     * 供认证流程在记录决策键时同时覆盖"带前缀/无前缀"两种昵称形态。
-     */
-    public static String getLivePrefix(String fallbackPrefix, Logger logger) {
-        ApiMethods methods = resolveMethods();
-        if (methods == null) {
-            return fallbackPrefix;
-        }
-        try {
-            Object instance = methods.getInstance().invoke(null);
-            if (instance == null) {
-                return fallbackPrefix;
-            }
-            Object prefix = methods.getPlayerPrefix().invoke(instance);
-            return prefix instanceof String value ? value : fallbackPrefix;
-        } catch (ReflectiveOperationException | RuntimeException | LinkageError e) {
-            if (logger != null) {
-                logger.debug("[基岩版] 读取 Floodgate 前缀失败: {}", e.getMessage());
-            }
-            return fallbackPrefix;
-        }
-    }
-
-    /**
      * 判断已建立连接的 UUID 是否属于基岩版玩家。
      * Floodgate 的 Java 侧 UUID 固定为 {@code new UUID(0, xuid)}，此特征可作为快速短路。
      */
@@ -72,10 +48,17 @@ public final class BedrockDetector {
     }
 
     /**
-     * 判断 PreLogin 阶段的用户名是否为基岩版玩家：
-     * 前缀匹配（配置兜底）优先，其次在 Floodgate 在线注册表中精确查找。
+     * 判断 PreLogin 阶段的用户名是否为基岩版玩家。
+     *
+     * <p><b>只信 Floodgate 的在线注册表，不依据用户名前缀</b>：前缀只是客户端自报字符串，
+     * 把"名字以某个字符开头"当成身份凭证，等于让连接方自己声明身份——任何能自造昵称的
+     * 客户端都能冒充基岩玩家。Floodgate 在加密握手阶段就已按 XUID 完成身份绑定，
+     * 它的注册表才是唯一权威依据；因此这里逐条比对注册表中的玩家昵称，前缀一概不看。
+     *
+     * <p>代价：Floodgate 不可用时基岩玩家无法被识别（会走离线注册/登录），
+     * 这是刻意的取舍——宁可多输一次密码，也不接受可伪造的身份判定。
      */
-    public static boolean isBedrockUsername(String username, String fallbackPrefix, Logger logger) {
+    public static boolean isBedrockUsername(String username, Logger logger) {
         if (username == null || username.isEmpty()) {
             return false;
         }
@@ -88,17 +71,7 @@ public final class BedrockDetector {
             if (instance == null) {
                 return false;
             }
-            // 1) 前缀判断：Java 版用户名不允许出现 '.' 等前缀字符
-            String prefix = methods.getPlayerPrefix().invoke(instance) instanceof String live
-                    ? live : fallbackPrefix;
-            if (prefix != null && !prefix.isEmpty()) {
-                // 前缀非空时它就是 Floodgate 给基岩玩家加的 Java 侧前缀：没带该前缀的名字
-                // 必然是 Java 玩家，直接返回，无需再遍历注册表。
-                // （旧实现每次 PreLogin 都会遍历全部基岩玩家、逐个反射取昵称——既在事件线程上，
-                //   又随基岩玩家数线性变慢；只有前缀为空（名称无法区分玩家类型）时才需要遍历）
-                return username.startsWith(prefix);
-            }
-            // 2) 注册表精确匹配（仅前缀为空时走到这里）
+            // 注册表精确匹配：逐个比对 Floodgate 已注册玩家的昵称
             Object players = methods.getPlayers().invoke(instance);
             if (players instanceof Iterable<?> iterable) {
                 for (Object player : iterable) {
@@ -144,8 +117,7 @@ public final class BedrockDetector {
             ApiMethods methods = new ApiMethods(
                     apiClass.getMethod("getInstance"),
                     apiClass.getMethod("isFloodgatePlayer", UUID.class),
-                    apiClass.getMethod("getPlayers"),
-                    apiClass.getMethod("getPlayerPrefix"));
+                    apiClass.getMethod("getPlayers"));
             METHODS.compareAndSet(null, methods);
             return METHODS.get();
         } catch (ClassNotFoundException e) {
@@ -157,6 +129,6 @@ public final class BedrockDetector {
     }
 
     private record ApiMethods(Method getInstance, Method isFloodgatePlayer,
-                              Method getPlayers, Method getPlayerPrefix) {
+                              Method getPlayers) {
     }
 }

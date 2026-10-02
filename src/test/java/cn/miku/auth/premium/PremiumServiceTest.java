@@ -62,7 +62,7 @@ class PremiumServiceTest {
     }
 
     private static PremiumResolution await(PremiumService service, String username) throws Exception {
-        return service.resolveAsync(username).get(5, TimeUnit.SECONDS);
+        return service.resolveAsync(username, null).get(5, TimeUnit.SECONDS);
     }
 
     // ---------------------------------------------------------------------
@@ -80,7 +80,7 @@ class PremiumServiceTest {
             // 12 个并发查询 × 3 个子任务；旧实现在 6 个并发时就会永久死锁
             List<CompletableFuture<PremiumResolution>> futures = new ArrayList<>();
             for (int i = 0; i < 12; i++) {
-                futures.add(service.resolveAsync("user" + i));
+                futures.add(service.resolveAsync("user" + i, null));
             }
             for (CompletableFuture<PremiumResolution> future : futures) {
                 assertTrue(future.get(5, TimeUnit.SECONDS).isOffline());
@@ -246,8 +246,8 @@ class PremiumServiceTest {
         try {
             // 基岩版前缀（含 '.'）与超短昵称都不可能是 Java 正版账号：
             // 必须判离线，否则 fail-closed 会把这类合法玩家直接拒之门外
-            assertTrue(service.resolveAsync(".Bedrock").get(5, TimeUnit.SECONDS).isOffline());
-            assertTrue(service.resolveAsync("ab").get(5, TimeUnit.SECONDS).isOffline());
+            assertTrue(service.resolveAsync(".Bedrock", null).get(5, TimeUnit.SECONDS).isOffline());
+            assertTrue(service.resolveAsync("ab", null).get(5, TimeUnit.SECONDS).isOffline());
             assertEquals(0, mojang.calls.get());
         } finally {
             service.shutdown();

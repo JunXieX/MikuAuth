@@ -145,8 +145,14 @@ final class YamlStore {
 
     @SuppressWarnings("unchecked")
     private static Map<String, Object> parse(InputStream input) {
-        // SafeConstructor：不使用可构造任意对象的默认构造器
-        Yaml yaml = new Yaml(new SafeConstructor(new LoaderOptions()));
+        // SafeConstructor：不使用可构造任意对象的默认构造器。
+        // 再显式设别名与码点上限：SafeConstructor 只挡住"实例化任意类"，挡不住
+        // 通过 YAML 结构本身放大内存的攻击（别名炸弹、超长文档）。配置是本地文件，
+        // 仍按纵深防御处理——解析发生在插件启动的必经路径上
+        LoaderOptions options = new LoaderOptions();
+        options.setMaxAliasesForCollections(50);
+        options.setCodePointLimit(3 * 1024 * 1024);
+        Yaml yaml = new Yaml(new SafeConstructor(options));
         Object loaded = yaml.load(input);
         return loaded instanceof Map<?, ?> map ? (Map<String, Object>) map : Map.of();
     }

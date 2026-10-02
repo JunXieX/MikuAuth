@@ -196,7 +196,10 @@ public final class JdbcDriverLoader {
     private Path download(DriverSpec spec, Path target) throws SQLException {
         IOException lastFailure = null;
         for (String mirror : spec.mirrors()) {
-            Path temp = target.resolveSibling(spec.fileName() + ".tmp");
+            // 临时文件名带进程号：多进程（多个代理实例共用一个数据目录）同时下载时，
+            // 固定名会让彼此覆盖对方写到一半的文件；唯一名让每次下载各写各的
+            Path temp = target.resolveSibling(
+                    spec.fileName() + "." + ProcessHandle.current().pid() + ".tmp");
             try {
                 if (logger != null) {
                     logger.info("[数据库] 未检测到本地 {} 驱动，正在下载：{}", spec.id(), mirror);
