@@ -441,16 +441,15 @@ public final class AdminCommand implements SimpleCommand {
         // 严格校验可选参数：拼错（--dryrun / --dry-run=true / 多余尾参）时报用法并中止，
         // 不能"当成 false 继续跑"—— 那会让管理员以为在试运行，实际已经把数据写进库了。
         // --confirm 由 execute 里统一校验（非 dry-run 的迁移必须带），这里只做位置合法性检查
-        boolean dryRun = false;
         for (int i = 3; i < args.length; i++) {
-            if ("--dry-run".equalsIgnoreCase(args[i])) {
-                dryRun = true;
-            } else if (!"--confirm".equalsIgnoreCase(args[i])) {
+            if (!"--dry-run".equalsIgnoreCase(args[i]) && !"--confirm".equalsIgnoreCase(args[i])) {
                 source.sendMessage(plugin.messages().prefixed("admin.usage",
                         Map.of("usage", "/mikuauth migrate <来源> <位置> [--dry-run] [--confirm]")));
                 return;
             }
         }
+        // 只赋值一次：下面的 lambda 要捕获它，必须 effectively final
+        final boolean dryRun = hasFlag(args, "--dry-run");
         source.sendMessage(plugin.messages().prefixed("admin.migrate.start",
                 Map.of("source", parsed.displayName(),
                         "mode", dryRun ? "试运行（不写入）" : "正式执行")));
