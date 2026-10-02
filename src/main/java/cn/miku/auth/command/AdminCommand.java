@@ -536,7 +536,7 @@ public final class AdminCommand implements SimpleCommand {
             invocation.source().sendMessage(plugin.messages().prefixed("admin.reload.done", Map.of()));
         } catch (Exception e) {
             invocation.source().sendMessage(plugin.messages().prefixed("admin.error",
-                    Map.of("reason", String.valueOf(e.getMessage()))));
+                    Map.of("reason", sanitizeFailure(e))));
         }
     }
 

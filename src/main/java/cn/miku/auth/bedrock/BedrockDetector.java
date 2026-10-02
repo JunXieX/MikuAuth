@@ -28,10 +28,14 @@ public final class BedrockDetector {
 
     /**
      * 判断已建立连接的 UUID 是否属于基岩版玩家。
-     * Floodgate 的 Java 侧 UUID 固定为 {@code new UUID(0, xuid)}，此特征可作为快速短路。
+     *
+     * <p>只以 Floodgate 的 API 结论为准，<b>不做"UUID 高位为 0"的前置短路</b>：
+     * 那条特征是 Floodgate 的内部实现细节，一旦它改用别的 UUID 方案，短路就会让所有
+     * 基岩玩家被误判成 Java 玩家、被迫走注册/登录；而 {@code isFloodgatePlayer} 只是一次
+     * 已缓存的反射调用，省不下多少开销，却把判定绑死在一条不受我们控制的假设上。
      */
     public static boolean isBedrockPlayer(UUID playerId) {
-        if (playerId == null || playerId.getMostSignificantBits() != 0L) {
+        if (playerId == null) {
             return false;
         }
         ApiMethods methods = resolveMethods();

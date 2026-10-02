@@ -66,8 +66,12 @@ public final class PremiumService {
      * <p>全局上限只能限制总量：单个来源用"不重复的合法昵称"批量建连照样能把配额吃满，
      * 而配额一满、fail-closed 生效，所有正常玩家（含正版）都会被以"无法验证"拒掉——
      * 等于一个来源就能造成全局可用性打击。因此按来源单独设一个远小于全局的上限。
+     *
+     * <p>取 8 而不是更小：同一 NAT 出口（学校、网吧、家庭）下多人同时首登是常态，
+     * 上限压得太低会让第 N 个人被判"无法验证"，在默认 fail-closed 下直接被拒——
+     * 那是把正常玩家当成攻击者。8 仍只占全局配额（32）的四分之一，足以限制单点刷量。
      */
-    private static final int PER_IP_IN_FLIGHT_LIMIT = 4;
+    private static final int PER_IP_IN_FLIGHT_LIMIT = 8;
     /** 权威源 ID（Mojang）。 */
     private static final String AUTHORITATIVE = "mojang";
 
