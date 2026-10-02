@@ -49,6 +49,17 @@ public final class AdminCommand implements SimpleCommand {
     private static final Set<String> READ_ONLY_SUB_COMMANDS =
             Set.of("accounts", "audit", "diagnose", "reload");
 
+    /** 只读权限节点：能查看账号、审计与诊断。 */
+    private static final String READ_PERMISSION = "mikuauth.admin";
+    /**
+     * 写权限节点：执行破坏性操作所必需。
+     *
+     * <p>与只读节点分离，好让服主把"能看"和"能改"分给不同的人（客服只发只读节点）。
+     * <b>注意</b>：这意味着原先只有 {@code mikuauth.admin} 的管理员在执行破坏性操作时
+     * 会收到明确的缺权限提示——按提示补发 {@code mikuauth.admin.write} 即可，不是静默失效。
+     */
+    private static final String WRITE_PERMISSION = "mikuauth.admin.write";
+
     private final MikuAuthPlugin plugin;
 
     public AdminCommand(MikuAuthPlugin plugin) {
@@ -74,6 +85,25 @@ public final class AdminCommand implements SimpleCommand {
         if (!READ_ONLY_SUB_COMMANDS.contains(sub) && invocation.source() instanceof Player player
                 && !plugin.authManager().isAllowed(player)) {
             invocation.source().sendMessage(messages.prefixed("error.must-authenticate", Map.of()));
+            return;
+        }
+        // 读 / 写分权 + 破坏性操作二次确认。
+        // 同一子命令按"本次参数"判定读还是写：limit 不带参数只是查看，migrate 带 --dry-run 不写库，
+        // 若按子命令名一刀切，"看一眼当前配额"也会被要求 --confirm。
+        boolean destructive = isDestructive(sub, args);
+        String required = destructive ? WRITE_PERMISSION : READ_PERMISSION;
+        if (!invocation.source().hasPermission(required)) {
+            invocation.source().sendMessage(messages.prefixed("admin.need-permission",
+                    Map.of("node", required)));
+            return;
+        }
+        if (destructive && !hasFlag(args, "--confirm")) {
+            StringBuilder rerun = new StringBuilder("/mikuauth");
+            for (String arg : args) {
+                rerun.append(' ').append(arg);
+            }
+            invocation.source().sendMessage(messages.prefixed("admin.need-confirm",
+                    Map.of("command", rerun.append(" --confirm").toString())));
             return;
         }
         switch (sub) {
@@ -409,13 +439,18 @@ public final class AdminCommand implements SimpleCommand {
             return;
         }
         // 严格校验可选参数：拼错（--dryrun / --dry-run=true / 多余尾参）时报用法并中止，
-        // 不能"当成 false 继续跑"—— 那会让管理员以为在试运行，实际已经把数据写进库了
-        if (args.length > 4 || (args.length == 4 && !"--dry-run".equalsIgnoreCase(args[3]))) {
-            source.sendMessage(plugin.messages().prefixed("admin.usage",
-                    Map.of("usage", "/mikuauth migrate <来源> <位置> [--dry-run]")));
-            return;
+        // 不能"当成 false 继续跑"—— 那会让管理员以为在试运行，实际已经把数据写进库了。
+        // --confirm 由 execute 里统一校验（非 dry-run 的迁移必须带），这里只做位置合法性检查
+        boolean dryRun = false;
+        for (int i = 3; i < args.length; i++) {
+            if ("--dry-run".equalsIgnoreCase(args[i])) {
+                dryRun = true;
+            } else if (!"--confirm".equalsIgnoreCase(args[i])) {
+                source.sendMessage(plugin.messages().prefixed("admin.usage",
+                        Map.of("usage", "/mikuauth migrate <来源> <位置> [--dry-run] [--confirm]")));
+                return;
+            }
         }
-        boolean dryRun = args.length == 4;
         source.sendMessage(plugin.messages().prefixed("admin.migrate.start",
                 Map.of("source", parsed.displayName(),
                         "mode", dryRun ? "试运行（不写入）" : "正式执行")));
@@ -446,6 +481,30 @@ public final class AdminCommand implements SimpleCommand {
                 source.sendMessage(plugin.messages().prefixed("admin.migrate.security-tip", Map.of()));
             }
         });
+    }
+
+    /**
+     * 本次调用是否属于"破坏性写操作"（需写权限 + {@code --confirm}）。
+     *
+     * <p>判定依据是参数而不只是子命令名，理由见调用点。
+     */
+    private static boolean isDestructive(String sub, String[] args) {
+        return switch (sub) {
+            case "deletepassword", "unbind", "setpassword", "passwd" -> true;
+            case "limit" -> args.length >= 2;
+            case "migrate" -> !hasFlag(args, "--dry-run");
+            default -> false;
+        };
+    }
+
+    /** 参数里是否出现了某个开关（大小写不敏感）。 */
+    private static boolean hasFlag(String[] args, String flag) {
+        for (String arg : args) {
+            if (flag.equalsIgnoreCase(arg)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /** 迁移位置是否被允许（未配置白名单时不限制）。 */
@@ -574,6 +633,8 @@ public final class AdminCommand implements SimpleCommand {
 
     @Override
     public boolean hasPermission(Invocation invocation) {
-        return invocation.source().hasPermission("mikuauth.admin");
+        // 外层只做"命令可用性"的粗筛：具体子命令用哪个节点由 execute 内部按读/写分别校验
+        return invocation.source().hasPermission(READ_PERMISSION)
+                || invocation.source().hasPermission(WRITE_PERMISSION);
     }
 }

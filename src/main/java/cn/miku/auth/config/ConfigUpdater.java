@@ -215,14 +215,14 @@ final class ConfigUpdater {
             return Result.NONE;
         }
 
+        // 每次改写前都刷新备份：备份的用途是"这一次改写写坏了能退回去"。
+        // 只在首次生成会让备份停留在几个版本之前，真出事时退回去的东西更旧、更不可用
         Path backup = file.resolveSibling(file.getFileName() + ".bak");
-        if (Files.notExists(backup)) {
-            Files.copy(file, backup);
-        }
+        Files.copy(file, backup, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
         writeAtomically(file, merged);
         if (logger != null) {
             if (!added.isEmpty()) {
-                logger.info("[配置] {} 已补充新增配置项: {}（首次修改前的备份：{}）",
+                logger.info("[配置] {} 已补充新增配置项: {}（改写前的备份：{}）",
                         file.getFileName(), String.join(", ", added), backup.getFileName());
             }
             if (!retiredNoted.isEmpty()) {
@@ -237,7 +237,8 @@ final class ConfigUpdater {
      * 原子写入：先写同目录临时文件再改名覆盖。
      *
      * <p>直接覆盖写有个真实的坏结果——写到一半进程被杀（或磁盘满）会把服主的配置
-     * 截断成半个文件，而此时"原文件备份"只存在于<b>首次</b>修改之前。
+     * 截断成半个文件。因此写入前总会刷新一份 {@code .bak}，保证随时能退回上一次
+     * 改写前的完整内容（备份是"改写前"的快照，每次改写都更新）。
      */
     private static void writeAtomically(Path file, String content) throws IOException {
         // 临时名唯一化：多个代理实例共用一个配置目录时，固定 .tmp 会让彼此覆盖

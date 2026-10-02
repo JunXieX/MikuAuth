@@ -219,12 +219,19 @@ admin:
     - "<yellow>/mikuauth unlock <玩家|IP></yellow> <dark_gray>-</dark_gray> <gray>解除登录失败的临时封禁</gray>"
     - "<yellow>/mikuauth limit [数量]</yellow> <dark_gray>-</dark_gray> <gray>查看/设置每 IP 账号上限</gray>"
     - "<yellow>/mikuauth reload</yellow> <dark_gray>-</dark_gray> <gray>重载配置与语言文件</gray>"
+    - "<gray>破坏性操作（deletepassword / unbind / setpassword / passwd / limit <数量> / 非 dry-run 的 migrate）需 <yellow>--confirm</yellow>，并要求 <yellow>mikuauth.admin.write</yellow> 权限节点。</gray>"
 
   # 参数不足时的用法提示。{usage} = 用法
   usage: "<red>用法：{usage}"
 
   # 通用错误。{reason} = 失败原因
   error: "<red>操作失败：{reason}"
+
+  # 缺少所需权限节点。{node} = 权限节点名
+  need-permission: "<red>该操作需要权限节点 <yellow>{node}</yellow>。"
+
+  # 破坏性操作缺少二次确认。{command} = 补全 --confirm 后的命令
+  need-confirm: "<red>该操作不可撤销，请补上 <yellow>--confirm</yellow> 再执行：<yellow>{command}"
 
   # 查询名下账号
   accounts:

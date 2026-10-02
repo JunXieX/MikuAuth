@@ -239,10 +239,12 @@ final class MariaDbBackend implements SqlBackend {
     public void swapPlayersTable(Connection connection, String migratingTable) throws SQLException {
         // 与 MariaDB 一致：一条语句原子换名，旧表保留为带时间戳的备份表。
         // MySQL/MariaDB 的 DDL 会隐式提交，因此"事务里换表"并不构成可回滚的操作。
+        // 表名无法用占位符参数化、只能拼接，因此在真正拼接处再校验一次白名单
+        String source = DatabaseManager.requireSafeIdentifier(migratingTable);
         String backup = backupTableName();
         try (Statement statement = connection.createStatement()) {
             statement.executeUpdate("RENAME TABLE miku_players TO " + backup + ", "
-                    + migratingTable + " TO miku_players");
+                    + source + " TO miku_players");
         }
         if (logger != null) {
             logger.warn("[数据库] 升级前的账号表已保留为 {}（确认新表无误后可手动删除）", backup);

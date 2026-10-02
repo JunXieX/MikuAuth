@@ -119,6 +119,7 @@ public final class AccountMigrator {
         int imported = 0;
         int skipped = 0;
         int noPassword = 0;
+        int failed = 0;
 
         try (Connection connection = open(url);
              Statement statement = connection.createStatement();
@@ -144,24 +145,39 @@ public final class AccountMigrator {
                 batch.add(account.toRequest());
                 if (batch.size() >= BATCH_SIZE) {
                     int written = flush(batch, failures);
-                    imported += written;
-                    skipped += batch.size() - written;
+                    if (written < 0) {
+                        failed += batch.size();
+                    } else {
+                        imported += written;
+                        skipped += batch.size() - written;
+                    }
                     batch.clear();
                     // 主动让出：给在线玩家的查询留出窗口，避免迁移把数据库线程占满
-                    Thread.sleep(BATCH_PAUSE_MILLIS);
+                    try {
+                        Thread.sleep(BATCH_PAUSE_MILLIS);
+                    } catch (InterruptedException interrupted) {
+                        // 恢复中断标记后中止（关服流程会打断迁移）：
+                        // 吞掉中断会让迁移在被要求停止后继续跑，拖着数据库线程不放
+                        Thread.currentThread().interrupt();
+                        throw interrupted;
+                    }
                 }
             }
             if (!batch.isEmpty()) {
                 int written = flush(batch, failures);
-                imported += written;
-                skipped += batch.size() - written;
+                if (written < 0) {
+                    failed += batch.size();
+                } else {
+                    imported += written;
+                    skipped += batch.size() - written;
+                }
             }
         }
 
         MigrationReport report = new MigrationReport(source.displayName(), dryRun, total,
-                imported, skipped, noPassword, failures);
+                imported, skipped, noPassword, failed, failures);
         logger.info("[迁移] {} 完成：共 {} 条，写入 {}，跳过 {}，无密码 {}，失败 {}",
-                source.displayName(), total, imported, skipped, noPassword, failures.size());
+                source.displayName(), total, imported, skipped, noPassword, failed);
         if (!dryRun) {
             audit.record(AuditAction.MIGRATE, "-", null, null,
                     "从 " + source.displayName() + " 迁移：" + imported + " 条写入，"
@@ -170,7 +186,7 @@ public final class AccountMigrator {
         return report;
     }
 
-    /** 提交一个批次；整批失败时只记一条批次级失败，避免刷屏且不中断后续批次。 */
+    /** 提交一个批次；返回实际写入条数，整批失败返回 {@code -1}（与"全部因重复被跳过"的 0 区分开）。 */
     private int flush(List<DatabaseManager.ImportRequest> batch, List<String> failures) {
         try {
             return target.importAccountsBatch(List.copyOf(batch)).join();
@@ -181,7 +197,7 @@ public final class AccountMigrator {
                 failures.add("……更多失败已省略");
             }
             logger.warn("[迁移] 批次写入失败（{} 条）: {}", batch.size(), rootMessage(t));
-            return 0;
+            return -1;
         }
     }
 

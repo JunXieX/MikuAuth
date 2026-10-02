@@ -59,7 +59,9 @@ public final class DisplayManager {
         final Map<String, String> placeholders;
         /** Dialog 打开中 = 静默。 */
         volatile boolean silent;
-        volatile int titleCounter;
+        /** Title 重发计数（原子自增：渲染路径可能被多方触发，非原子会偶发丢帧）。 */
+        final java.util.concurrent.atomic.AtomicInteger titleCounter =
+                new java.util.concurrent.atomic.AtomicInteger();
         /** 上次心跳渲染的剩余秒数（-1 = 不限时），秒数不变则跳过 BossBar 文本重建。 */
         volatile long lastRemainSeconds = -2;
 
@@ -246,8 +248,8 @@ public final class DisplayManager {
                 display.bossBar.progress(1f);
             }
         }
-        display.titleCounter++;
-        if (config.titleEnabled() && display.titleCounter % TITLE_REFRESH_SECONDS == 0) {
+        int ticks = display.titleCounter.incrementAndGet();
+        if (config.titleEnabled() && ticks % TITLE_REFRESH_SECONDS == 0) {
             sendTitle(player, display);
         }
     }

@@ -70,10 +70,13 @@ final class SqliteBackend implements SqlBackend {
 
     @Override
     public void swapPlayersTable(Connection connection, String migratingTable) throws SQLException {
+        // 表名无法用占位符参数化、只能拼接，因此在真正拼接处再校验一次白名单，
+        // 不再依赖"调用方一定校验过"这个跨类假设
+        String source = DatabaseManager.requireSafeIdentifier(migratingTable);
         // SQLite 不支持一条语句重命名多张表；DDL 在事务内可回滚，先删后改是安全的
         try (Statement statement = connection.createStatement()) {
             statement.executeUpdate("DROP TABLE miku_players");
-            statement.executeUpdate("ALTER TABLE " + migratingTable + " RENAME TO miku_players");
+            statement.executeUpdate("ALTER TABLE " + source + " RENAME TO miku_players");
         }
     }
 

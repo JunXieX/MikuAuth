@@ -613,8 +613,7 @@ public final class DatabaseManager implements AuthRepository, AuditRepository, A
             List<StoredPlayer> players = new ArrayList<>();
             try (PreparedStatement ps = connection.prepareStatement("""
                     SELECT * FROM miku_players
-                    WHERE register_ip = ? OR last_login_ip = ?
-                    ORDER BY register_time DESC""")) {
+                    WHERE register_ip = ? OR last_login_ip = ?""")) {
                 ps.setString(1, ip);
                 ps.setString(2, ip);
                 try (ResultSet rs = ps.executeQuery()) {
@@ -623,6 +622,9 @@ public final class DatabaseManager implements AuthRepository, AuditRepository, A
                     }
                 }
             }
+            // 排序放到内存里做：register_time 上没有索引，交给数据库会多一次 filesort。
+            // 这条查询只在管理命令里用、结果集不大，内存排序更划算
+            players.sort(java.util.Comparator.comparingLong(StoredPlayer::registerTime).reversed());
             return players;
         });
     }
@@ -876,8 +878,9 @@ public final class DatabaseManager implements AuthRepository, AuditRepository, A
      * 接到拼接位置而引入注入。
      *
      * <p>本项目的所有标识符均为小写字母/数字/下划线，校验不会误伤。
+     * 包内可见：方言后端在自行拼接表名前也要复用它。
      */
-    private static String requireSafeIdentifier(String identifier) {
+    static String requireSafeIdentifier(String identifier) {
         if (identifier == null || !identifier.matches("[a-z0-9_]{1,64}")) {
             throw new IllegalArgumentException("非法的 SQL 标识符: " + identifier);
         }
@@ -997,6 +1000,27 @@ public final class DatabaseManager implements AuthRepository, AuditRepository, A
     // 审计日志
     // ---------------------------------------------------------------------
 
+    /** {@code detail} 列的宽度（MariaDB / MySQL 侧建表为 VARCHAR(255)）。 */
+    private static final int MAX_DETAIL_LENGTH = 255;
+
+    /**
+     * 按列宽截断审计详情。
+     *
+     * <p>超长值在严格模式下会让<b>整条</b>审计写入失败（只降级成一条 WARN），
+     * 在非严格模式下则被静默截断——两种表现都不能接受。这里统一在写入前截断：
+     * 宁可少记一条的尾巴，也不丢整条记录，并让"发生了截断"留有痕迹。
+     */
+    private String fitDetail(String nickname, String detail) {
+        if (detail == null || detail.length() <= MAX_DETAIL_LENGTH) {
+            return detail;
+        }
+        if (logger != null) {
+            logger.debug("[数据库] {} 的审计详情超过 {} 字符，已截断",
+                    nickname, MAX_DETAIL_LENGTH);
+        }
+        return detail.substring(0, MAX_DETAIL_LENGTH);
+    }
+
     @Override
     public CompletableFuture<Void> appendAudit(AuditEntry entry) {
         return supply(connection -> {
@@ -1009,7 +1033,7 @@ public final class DatabaseManager implements AuthRepository, AuditRepository, A
                 ps.setString(3, entry.uuid() == null ? null : UuidUtil.format(entry.uuid()));
                 ps.setString(4, entry.ip());
                 ps.setString(5, entry.action().name());
-                ps.setString(6, entry.detail());
+                ps.setString(6, fitDetail(entry.nickname(), entry.detail()));
                 ps.setLong(7, entry.createdAt());
                 ps.executeUpdate();
             }
