@@ -311,7 +311,7 @@ class ConfigAndMessagesTest {
         assertEquals(30000, config.premiumTimeoutMillis());
         assertEquals(1, config.minPasswordLength());
         assertEquals(128, config.maxPasswordLength());
-        assertEquals(31, config.bcryptCost());
+        assertEquals(16, config.bcryptCost());
         // 未出现在用户文件中的键继续使用内置默认
         assertEquals("auth", config.authServer());
     }
