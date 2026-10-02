@@ -77,9 +77,22 @@ public final class AccountMigrator {
         });
     }
 
-    /** 插件关闭时调用。 */
+    /**
+     * 停止迁移执行器，并等待在途任务结束。
+     *
+     * <p><b>必须等</b>：迁移任务会用主库的驱动类加载器去连源库，若它还在跑、而
+     * {@code DatabaseManager.close()} 已经把加载器关掉，任务会撞上
+     * {@code NoClassDefFoundError}（不是一次干净的中断）。等几秒比留下这个竞态划算。
+     */
     public void shutdown() {
         executor.shutdownNow();
+        try {
+            if (!executor.awaitTermination(5, java.util.concurrent.TimeUnit.SECONDS)) {
+                logger.warn("[迁移] 停止后仍有任务未结束，已放弃等待");
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
     }
 
     /**

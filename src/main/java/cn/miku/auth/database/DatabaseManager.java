@@ -1208,5 +1208,8 @@ public final class DatabaseManager implements AuthRepository, AuditRepository, A
             Thread.currentThread().interrupt();
         }
         backend.close();
+        // 最后才交还驱动类加载器：此刻数据库连接池与迁移器都已停妥，
+        // 不会再有代码从中加载类（提前关会让在途查询/迁移撞上 NoClassDefFoundError）
+        driverLoader.close();
     }
 }

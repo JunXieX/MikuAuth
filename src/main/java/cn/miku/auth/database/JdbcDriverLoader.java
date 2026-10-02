@@ -92,6 +92,15 @@ public final class JdbcDriverLoader {
     private final Logger logger;
     /** 每种驱动装载一次后复用（键 = spec.id()）；其类加载器不可关闭（驱动仍在使用）。 */
     private final Map<String, Driver> loadedDrivers = new ConcurrentHashMap<>();
+    /**
+     * 本装载器创建的类加载器，供关停时统一关闭。
+     *
+     * <p>驱动是按需从 jar 里加载的，用的加载器要一直活到"所有连接与迁移任务结束"为止，
+     * 因此运行期不能关；但代理关停后它没有存在意义了，jar 的文件句柄与 metaspace
+     * 应当交还回去，而不是随代理进程一起挂着。
+     */
+    private final java.util.List<java.net.URLClassLoader> closeableLoaders =
+            new java.util.concurrent.CopyOnWriteArrayList<>();
 
     public JdbcDriverLoader(Path dataDirectory, Logger logger) {
         this.libsDirectory = dataDirectory.resolve("libs");
@@ -255,18 +264,50 @@ public final class JdbcDriverLoader {
 
     /** ④ 用独立类加载器装载下载下来的驱动。 */
     private Driver loadFromJar(DriverSpec spec, Path jar) throws SQLException {
+        URLClassLoader loader = null;
         try {
-            URLClassLoader loader = new URLClassLoader(
+            loader = new URLClassLoader(
                     new URL[]{jar.toUri().toURL()}, JdbcDriverLoader.class.getClassLoader());
             Class<?> clazz = Class.forName(spec.driverClass(), true, loader);
             Driver loaded = (Driver) clazz.getDeclaredConstructor().newInstance();
+            // 只有装载成功才登记：失败路径会在下面立刻把它关掉，不能留进待关闭表
+            closeableLoaders.add(loader);
             if (logger != null) {
                 logger.info("[数据库] 已装载 {} 驱动：{}", spec.id(), jar);
             }
             return loaded;
         } catch (Throwable t) {
+            closeQuietly(loader);
             // 类链接失败是 Error 而非 Exception，这里必须兜住并转成带原因的 SQLException
             throw new SQLException("装载 " + spec.id() + " 驱动失败: " + t, t);
+        }
+    }
+
+    /**
+     * 关闭所有由本装载器创建的类加载器。
+     *
+     * <p><b>调用时机</b>：必须在所有使用该驱动的连接、以及账号迁移任务都结束之后
+     * （见 {@code DatabaseManager.close()} 的末尾）。加载器一旦关闭，再从中加载类会抛
+     * {@code NoClassDefFoundError}，所以顺序不能颠倒。
+     *
+     * <p>可安全重复调用：关闭后即从表中移除。
+     */
+    public void close() {
+        for (URLClassLoader loader : closeableLoaders) {
+            closeQuietly(loader);
+        }
+        closeableLoaders.clear();
+    }
+
+    /** 静默关闭一个类加载器：关不掉不影响关停主流程。 */
+    private static void closeQuietly(URLClassLoader loader) {
+        if (loader == null) {
+            return;
+        }
+        try {
+            loader.close();
+        } catch (IOException ignored) {
+            // 关闭失败不影响关停流程
         }
     }
 
