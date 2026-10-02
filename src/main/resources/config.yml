@@ -21,7 +21,7 @@ server:
   # 认证服务器名 —— 玩家进入代理后先被送到这里完成登录/注册。
   # 必须与 velocity.toml [servers] 中登记的名称完全一致。
   # ⚠ 若找不到该服务器，插件会直接停用（不加载任何功能）并在控制台报错。
-  auth-server: "auth"
+  auth-server: "limbo"
 
   # 认证完成后把玩家送回哪个服务器。
   # 留空 = 自动使用 velocity.toml 中 try 列表的第一个非认证服。
@@ -174,7 +174,7 @@ migrate:
 registration:
 
   # 密码最小长度（字符）。
-  min-password-length: 6
+  min-password-length: 4
 
   # 密码最大长度（字符）。
   max-password-length: 32

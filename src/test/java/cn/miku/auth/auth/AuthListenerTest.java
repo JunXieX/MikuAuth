@@ -44,7 +44,7 @@ class AuthListenerTest {
     void setUp() throws Exception {
         server = mock(ProxyServer.class);
         authManager = mock(AuthManager.class);
-        // 用真实配置（默认值）：auth-server = "auth"、命令别名 = l/log、reg
+        // 用真实配置（默认值）：auth-server = "limbo"、命令别名 = l/log、reg
         MikuConfig config = new MikuConfig();
         config.load(tempDir, null);
         listener = new AuthListener(server, LoggerFactory.getLogger("MikuAuthTest"), config, authManager);
@@ -122,7 +122,7 @@ class AuthListenerTest {
         when(player.getUsername()).thenReturn("Alex");
         when(authManager.lastLoginModeFor("Alex")).thenReturn(AuthManager.LoginMode.OFFLINE);
         when(authManager.isSessionVerifiedFor("Alex", null)).thenReturn(false);
-        when(server.getServer("auth")).thenReturn(Optional.of(authServer));
+        when(server.getServer("limbo")).thenReturn(Optional.of(authServer));
 
         listener.onChooseInitialServer(event);
 

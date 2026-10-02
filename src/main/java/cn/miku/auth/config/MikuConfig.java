@@ -71,7 +71,7 @@ public final class MikuConfig {
 
     /** 认证服务器名（玩家必须先在此服完成登录/注册）。 */
     public String authServer() {
-        return getString("server.auth-server", "auth");
+        return getString("server.auth-server", "limbo");
     }
 
     /** 认证完成后送回的服务器；留空表示使用 velocity.toml 的 try 列表第一个。 */
@@ -261,7 +261,7 @@ public final class MikuConfig {
     /** 密码最小长度。 */
     public int minPasswordLength() {
         return clampValue("registration.min-password-length",
-                getInt("registration.min-password-length", 6), 1, 64);
+                getInt("registration.min-password-length", 4), 1, 64);
     }
 
     /**
@@ -456,7 +456,7 @@ public final class MikuConfig {
         // 密码长度上下限交叉校验：两组值各自都在合法区间内，单看钳制日志看不出问题，
         // 但 min > max 时没有密码能同时满足两者——玩家注册不了、也改不了密码
         int rawMin = clampValue("registration.min-password-length",
-                getInt("registration.min-password-length", 6), 1, 64);
+                getInt("registration.min-password-length", 4), 1, 64);
         int rawMax = clampValue("registration.max-password-length",
                 getInt("registration.max-password-length", 32), 1, 128);
         if (rawMin > rawMax) {

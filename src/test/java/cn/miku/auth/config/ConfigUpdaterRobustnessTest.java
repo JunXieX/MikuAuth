@@ -107,7 +107,7 @@ class ConfigUpdaterRobustnessTest {
         // 首行就是键（用户删掉了文件开头的注释块）且带 UTF-8 BOM：
         // 该键会被正则漏检，导致整个 server 段被重复追加
         String withoutHead = template().replaceAll("\\A(?:(?:#.*)?\\r?\\n)+", "")
-                .replace("auth-server: \"auth\"", "auth-server: \"myauth\"");
+                .replace("auth-server: \"limbo\"", "auth-server: \"myauth\"");
         String user = "\uFEFF" + withoutHead;
         assertTrue(withoutHead.startsWith("server:"), "用例前提：首行应为键");
 

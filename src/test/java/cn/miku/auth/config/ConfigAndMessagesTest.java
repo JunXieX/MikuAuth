@@ -179,7 +179,7 @@ class ConfigAndMessagesTest {
         config.load(tempDir, null);
 
         assertTrue(Files.exists(tempDir.resolve("config.yml")));
-        assertEquals("auth", config.authServer());
+        assertEquals("limbo", config.authServer());
         assertEquals("", config.fallbackServer());
         assertTrue(config.premiumEnabled());
         assertTrue(config.premiumFailClosed());
@@ -313,7 +313,7 @@ class ConfigAndMessagesTest {
         assertEquals(128, config.maxPasswordLength());
         assertEquals(16, config.bcryptCost());
         // 未出现在用户文件中的键继续使用内置默认
-        assertEquals("auth", config.authServer());
+        assertEquals("limbo", config.authServer());
     }
 
     @Test
