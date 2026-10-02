@@ -278,10 +278,16 @@ public final class MikuConfig {
         return Math.max(max, min);
     }
 
-    /** 每 IP 可注册的账号上限；0 = 不限制。运行时可用 /mikuauth limit 临时覆盖。 */
+    /**
+     * 每 IP 可注册的账号上限；0 = 不限制。运行时可用 /mikuauth limit 临时覆盖。
+     *
+     * <p>只统计<b>离线</b>账号：正版账号由正版玩家首次进入时自动登记，创建不由玩家发起，
+     * 若计入配额，"同 IP 下几个正版玩家"就会把离线账号的注册名额挤没。判定见
+     * {@code DatabaseManager.countAccountsByIp}。
+     */
     public int maxAccountsPerIp() {
         Integer override = maxAccountsPerIpOverride;
-        return override != null ? override : Math.max(0, getInt("registration.max-accounts-per-ip", 3));
+        return override != null ? override : Math.max(0, getInt("registration.max-accounts-per-ip", 5));
     }
 
     /** 运行时覆盖 IP 限号（不写入配置文件，重启后失效）。 */

@@ -183,7 +183,7 @@ class ConfigAndMessagesTest {
         assertEquals("", config.fallbackServer());
         assertTrue(config.premiumEnabled());
         assertTrue(config.premiumFailClosed());
-        assertEquals(3, config.maxAccountsPerIp());
+        assertEquals(5, config.maxAccountsPerIp());
         assertEquals(60, config.authTimeoutSeconds());
         assertEquals(10, config.bcryptCost());
         assertEquals(List.of("l", "log"), config.loginAliases());
@@ -337,7 +337,7 @@ class ConfigAndMessagesTest {
     void runtimeIpLimitOverrideWins() throws Exception {
         MikuConfig config = new MikuConfig();
         config.load(tempDir, null);
-        assertEquals(3, config.maxAccountsPerIp());
+        assertEquals(5, config.maxAccountsPerIp());
 
         config.setMaxAccountsPerIpOverride(0);
         assertEquals(0, config.maxAccountsPerIp());
