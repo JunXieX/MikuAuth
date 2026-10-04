@@ -90,6 +90,26 @@ MikuMC 系列插件交流群：1105054380
 
 未认证玩家会被限制在认证服内，且只能使用登录/注册相关命令。
 
+## 给其它插件用的 API
+
+其它 Velocity 插件可以直接查询"某玩家是否已完成认证"，无需依赖本插件的主类：
+
+```java
+import cn.miku.auth.api.MikuAuthProvider;
+
+MikuAuthProvider.get().ifPresent(api -> {
+    if (api.isAuthenticated(player.getUniqueId())) {
+        // 已认证，放行
+    }
+});
+```
+
+- 返回 `true` 的情况：密码登录，以及**正版免密、基岩版免密、同 IP 会话免密**。
+- 查询的是**当前这条连接**：玩家一断线立即变回 `false`，认证状态不跨连接保存。
+- MikuAuth 未安装、加载失败或已停用时 `get()` 返回空，按"未认证"处理即可。
+- 也可直接传 `Player`：`api.isAuthenticated(player)`。
+- 线程安全，可从任意线程调用。
+
 ## 数据库
 
 | 类型 | 适用场景 | 说明 |
