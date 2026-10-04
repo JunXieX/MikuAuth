@@ -1,5 +1,7 @@
 package cn.miku.auth;
 
+import cn.miku.auth.api.MikuAuthApi;
+import cn.miku.auth.api.MikuAuthProvider;
 import cn.miku.auth.auth.AuthListener;
 import cn.miku.auth.auth.AuthManager;
 import cn.miku.auth.auth.DialogCloseListener;
@@ -35,6 +37,7 @@ import org.slf4j.Logger;
 import java.io.IOException;
 import java.nio.file.Path;
 import java.time.Duration;
+import java.util.UUID;
 
 /**
  * MikuAuth —— Velocity 登录验证插件。
@@ -68,7 +71,7 @@ import java.time.Duration;
                 @Dependency(id = "floodgate", optional = true)
         }
 )
-public final class MikuAuthPlugin {
+public final class MikuAuthPlugin implements MikuAuthApi {
 
     /**
      * 插件版本：唯一的版本号来源（{@code pom.xml} 需同步修改）。
@@ -228,6 +231,9 @@ public final class MikuAuthPlugin {
                 .repeat(Duration.ofMinutes(5))
                 .schedule();
 
+        // 对外 API：等所有组件就绪后才发布，避免别的插件拿到一个还答不了查询的实现
+        MikuAuthProvider.register(this);
+
         logger.info("[MikuAuth] v{} 已加载 — 正版验证: {} | 基岩版(Floodgate): {} | 认证服: {}",
                 VERSION,
                 premiumService.hasResolvers() ? "启用" : "禁用",
@@ -338,6 +344,8 @@ public final class MikuAuthPlugin {
 
     @Subscribe
     public void onProxyShutdown(ProxyShutdownEvent event) {
+        // 先撤销对外 API：关停过程中不应再有人从我们这里取认证状态
+        MikuAuthProvider.register(null);
         // 注意：初始化失败时不能跳过清理 —— initialize() 可能在建好部分组件
         // （数据库连接池、写盘队列）之后才报错，它们的线程与连接必须在这里关闭
         if (authManager != null) {
@@ -361,6 +369,22 @@ public final class MikuAuthPlugin {
             database.close();
             logger.info("[MikuAuth] 已卸载，数据库连接已关闭");
         }
+    }
+
+    // ---------------------------------------------------------------------
+    // 对外 API
+    // ---------------------------------------------------------------------
+
+    /**
+     * 该玩家当前连接是否已通过认证（对外 API，见 {@link MikuAuthApi}）。
+     *
+     * <p>初始化失败时 {@code authManager} 为 null，此时一律返回 false：没把握就不要
+     * 告诉别人"已登录"——这与本插件其它闸门一贯的 fail-closed 取向一致。
+     */
+    @Override
+    public boolean isAuthenticated(UUID playerId) {
+        AuthManager manager = authManager;
+        return manager != null && manager.isAuthenticated(playerId);
     }
 
     // ---------------------------------------------------------------------
