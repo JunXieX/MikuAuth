@@ -129,9 +129,30 @@ public final class MikuConfig {
         return Math.max(0, getInt("premium.hit-ttl-minutes", 60));
     }
 
-    /** 离线（未命中）结果缓存时长（分钟），0 = 不缓存。 */
+    /**
+     * 离线（未命中）结果缓存时长（分钟），0 = 不缓存。
+     */
     public int premiumMissTtlMinutes() {
         return Math.max(0, getInt("premium.miss-ttl-minutes", 10));
+    }
+
+    /**
+     * 同时在途的正版查询数上限（准入控制）：超过即按"无法判定"处理。
+     *
+     * <p>只有未注册昵称的首次连接会走到这条路径（命中缓存不受影响）。一旦上限被吃满，
+     * 多出来的玩家在默认 fail-closed 下会被直接拒绝（提示"无法完成正版验证"），
+     * 因此开服 / 活动高峰有大量新玩家同时首登时，按预期峰值上调即可。
+     */
+    public int premiumMaxInFlightQueries() {
+        return clampValue("premium.max-in-flight-queries",
+                getInt("premium.max-in-flight-queries", 32), 1, 1024);
+    }
+
+    /** 单个来源 IP 的在途查询数上限；不会超过全局上限（超出时按全局上限生效）。 */
+    public int premiumMaxInFlightPerIp() {
+        int perIp = clampValue("premium.max-in-flight-per-ip",
+                getInt("premium.max-in-flight-per-ip", 8), 1, 256);
+        return Math.min(perIp, premiumMaxInFlightQueries());
     }
 
     /**
@@ -463,6 +484,14 @@ public final class MikuConfig {
             logger.warn("[配置] registration.min-password-length ({}) 大于 max-password-length ({})，"
                     + "没有密码能同时满足两者；运行时已把上限抬到 {} 以保证至少有一个可用长度，请修正配置",
                     rawMin, rawMax, rawMin);
+        }
+        // 每 IP 上限大于全局上限时，全局先被吃满，实际按全局上限生效（否则配置看起来"没生效"）
+        int globalInFlight = premiumMaxInFlightQueries();
+        int perIpInFlight = clampValue("premium.max-in-flight-per-ip",
+                getInt("premium.max-in-flight-per-ip", 8), 1, 256);
+        if (perIpInFlight > globalInFlight) {
+            logger.warn("[配置] premium.max-in-flight-per-ip ({}) 大于 max-in-flight-queries ({})，"
+                    + "实际按全局上限 {} 生效", perIpInFlight, globalInFlight, globalInFlight);
         }
     }
 

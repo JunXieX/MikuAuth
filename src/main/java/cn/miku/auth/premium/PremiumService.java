@@ -56,22 +56,23 @@ public final class PremiumService {
 
     /** 内存缓存容量上限。 */
     private static final int MAX_CACHE_SIZE = 10_000;
-    /** 在途查询上限（准入控制）：超过即拒绝新查询，避免上游洪泛与无界堆积。 */
-    private static final int MAX_IN_FLIGHT_QUERIES = 32;
+    /** 在途查询上限的默认值（准入控制）：超过即拒绝新查询，避免上游洪泛与无界堆积。 */
+    private static final int DEFAULT_MAX_IN_FLIGHT = 32;
     /** 外部查询线程池的队列上限（配合 AbortPolicy，拒绝路径已有兜底）。 */
     private static final int QUEUE_CAPACITY = 256;
     /**
-     * 单来源 IP 的在途查询上限。
+     * 单来源 IP 在途查询上限的默认值。
      *
      * <p>全局上限只能限制总量：单个来源用"不重复的合法昵称"批量建连照样能把配额吃满，
      * 而配额一满、fail-closed 生效，所有正常玩家（含正版）都会被以"无法验证"拒掉——
      * 等于一个来源就能造成全局可用性打击。因此按来源单独设一个远小于全局的上限。
      *
-     * <p>取 8 而不是更小：同一 NAT 出口（学校、网吧、家庭）下多人同时首登是常态，
+     * <p>默认取 8 而不是更小：同一 NAT 出口（学校、网吧、家庭）下多人同时首登是常态，
      * 上限压得太低会让第 N 个人被判"无法验证"，在默认 fail-closed 下直接被拒——
-     * 那是把正常玩家当成攻击者。8 仍只占全局配额（32）的四分之一，足以限制单点刷量。
+     * 那是把正常玩家当成攻击者。8 只占默认全局配额（32）的四分之一，足以限制单点刷量。
+     * 两端都可通过 config.yml 的 {@code premium.max-in-flight-*} 调整。
      */
-    private static final int PER_IP_IN_FLIGHT_LIMIT = 8;
+    private static final int DEFAULT_PER_IP_LIMIT = 8;
     /** 权威源 ID（Mojang）。 */
     private static final String AUTHORITATIVE = "mojang";
 
@@ -83,6 +84,15 @@ public final class PremiumService {
     private volatile long missTtlNanos;
     /** 单次查询的兜底总超时（毫秒）：任一源异常挂起时保证调用方仍能拿到结果。 */
     private volatile int queryTimeoutMillis;
+    /**
+     * 准入上限（可配置：{@code premium.max-in-flight-queries} / {@code max-in-flight-per-ip}）。
+     *
+     * <p>默认 32 / 8 是"单点刷量防护"与"高峰正常首登"之间的折中：只有未注册昵称的首次
+     * 连接会走这条路径，一旦上限被吃满，多出来的玩家在 fail-closed 下会被直接拒绝
+     * （提示"无法完成正版验证"）。玩家规模较大的服按预期峰值上调即可。
+     */
+    private volatile int maxInFlightQueries;
+    private volatile int maxInFlightPerIp;
 
     /** 结果缓存（含过期时间戳）。 */
     private final ConcurrentHashMap<String, CachedResolution> cache = new ConcurrentHashMap<>();
@@ -104,7 +114,7 @@ public final class PremiumService {
         this.logger = logger;
         this.resolvers = List.copyOf(buildResolvers(config));
         applyTuning(config);
-        this.executor = newExecutor(resolvers.size());
+        this.executor = newExecutor(resolvers.size(), maxInFlightQueries);
     }
 
     /**
@@ -116,7 +126,9 @@ public final class PremiumService {
         this.hitTtlNanos = 60_000_000_000L;
         this.missTtlNanos = 60_000_000_000L;
         this.queryTimeoutMillis = queryTimeoutMillis;
-        this.executor = newExecutor(resolvers.size());
+        this.maxInFlightQueries = DEFAULT_MAX_IN_FLIGHT;
+        this.maxInFlightPerIp = DEFAULT_PER_IP_LIMIT;
+        this.executor = newExecutor(resolvers.size(), maxInFlightQueries);
     }
 
     /**
@@ -126,10 +138,13 @@ public final class PremiumService {
      * 任务可以无限堆积，既吃内存也对上游 API 洪泛。现在改为有界队列 + AbortPolicy，
      * 拒绝路径由 {@link #startQuery(String)} 转成"立即失败"而不是抛出。
      */
-    private static ExecutorService newExecutor(int resolverCount) {
+    private static ExecutorService newExecutor(int resolverCount, int maxInFlight) {
         int threads = Math.max(3, resolverCount * 2);
+        // 队列随准入上限一起放大（每次查询最多提交 3 个叶子任务）：
+        // 准入上限调到 100 以上时队列若还停在 256，正常排队也会被 AbortPolicy 拒绝
+        int queueCapacity = Math.max(QUEUE_CAPACITY, maxInFlight * 3);
         return new ThreadPoolExecutor(threads, threads, 0L, TimeUnit.MILLISECONDS,
-                new ArrayBlockingQueue<>(QUEUE_CAPACITY), runnable -> {
+                new ArrayBlockingQueue<>(queueCapacity), runnable -> {
                     Thread thread = new Thread(runnable, "MikuAuth-Premium");
                     thread.setDaemon(true);
                     return thread;
@@ -201,10 +216,10 @@ public final class PremiumService {
         // 2. 准入控制：这条路径在 PreLogin 阶段就能被任意昵称触发（不需要先认证），
         //    没有上限时随机昵称批量建连即可堆积无界任务、并对上游 API 洪泛。
         //    超过上限一律按 UNKNOWN 处理（fail-closed 下会拒绝），绝不无限排队。
-        if (inFlightCount.get() >= MAX_IN_FLIGHT_QUERIES) {
+        if (inFlightCount.get() >= maxInFlightQueries) {
             if (logger != null) {
                 logger.warn("[正版验证] 并发查询达到上限 {}（疑似被批量建连刷量），本次按无法判定处理: {}",
-                        MAX_IN_FLIGHT_QUERIES, username);
+                        maxInFlightQueries, username);
             }
             return CompletableFuture.completedFuture(
                     PremiumResolution.unknown("service", "并发查询过载"));
@@ -215,10 +230,10 @@ public final class PremiumService {
         String ipKey = ip == null || ip.isEmpty() ? null : ip;
         if (ipKey != null) {
             AtomicInteger perIp = inFlightByIp.get(ipKey);
-            if (perIp != null && perIp.get() >= PER_IP_IN_FLIGHT_LIMIT) {
+            if (perIp != null && perIp.get() >= maxInFlightPerIp) {
                 if (logger != null) {
                     logger.warn("[正版验证] 来源 {} 的并发查询达到上限 {}（疑似批量建连刷量），本次按无法判定处理: {}",
-                            ipKey, PER_IP_IN_FLIGHT_LIMIT, username);
+                            ipKey, maxInFlightPerIp, username);
                 }
                 return CompletableFuture.completedFuture(
                         PremiumResolution.unknown("service", "来源并发查询过载"));
@@ -276,7 +291,9 @@ public final class PremiumService {
         try {
             return queryApis(username);
         } catch (RejectedExecutionException e) {
-            inFlightCount.decrementAndGet();
+            // 只把异常转成"失败的结果"，**不在这里释放额度**：额度统一由 resolveAsync 里
+            // creator 的 whenComplete 释放。过去两处各减一次，每次队列满都会让计数净减 1；
+            // 计数一旦为负，全局准入上限就再也不成立，且越堆积越失效（自我强化）
             CompletableFuture<PremiumResolution> failed = new CompletableFuture<>();
             failed.completeExceptionally(e);
             return failed;
@@ -461,5 +478,7 @@ public final class PremiumService {
         // 单源超时是 connect/read 各自的超时，一次查询最多经历"连接 + 读取"两段（可能还含一次重试），
         // 这里留足余量：正常路径永远走不到兜底超时，它只为"DNS 挂起"这类病态情况兜底
         this.queryTimeoutMillis = config.premiumTimeoutMillis() * 3 + 1000;
+        this.maxInFlightQueries = config.premiumMaxInFlightQueries();
+        this.maxInFlightPerIp = config.premiumMaxInFlightPerIp();
     }
 }
