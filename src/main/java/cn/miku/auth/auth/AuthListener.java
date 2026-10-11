@@ -287,6 +287,8 @@ public final class AuthListener {
                     remoteIp(player));
         }
         pendingDenials.remove(player.getUniqueId());
-        authManager.handleDisconnect(player.getUsername(), player.getUniqueId());
+        // 传连接与来源 IP：认证标记与会话免密标记都要按"这条连接"清理，
+        // 直接按 UUID/昵称清会误伤同名双连接中的另一条
+        authManager.handleDisconnect(player, remoteIp(player));
     }
 }

@@ -84,8 +84,13 @@ public final class TextUtil {
         return render(raw, null);
     }
 
-    /** 转义 MiniMessage 特殊字符，防止占位符值破坏标签结构。 */
-    private static String escape(String value) {
+    /**
+     * 转义 MiniMessage 特殊字符（反斜杠与尖括号），防止占位符值破坏标签结构。
+     *
+     * <p>公开给"自行拼接原文、稍后再交给 {@link #render(String)} 解析"的调用点复用
+     * （例如 {@code AuthManager.renderText} 拼给 Dialog 正文的附加行）。
+     */
+    public static String escape(String value) {
         if (value == null) {
             return "";
         }

@@ -17,6 +17,7 @@ import cn.miku.auth.premium.PremiumService;
 import cn.miku.auth.security.LoginThrottle;
 import cn.miku.auth.security.PasswordHasher;
 import cn.miku.auth.security.PasswordPolicy;
+import cn.miku.auth.util.TextUtil;
 import cn.miku.auth.util.UuidUtil;
 import com.velocitypowered.api.event.connection.DisconnectEvent;
 import com.velocitypowered.api.proxy.ConnectionRequestBuilder;
@@ -156,8 +157,20 @@ public final class AuthManager {
 
     /** 在线玩家会话状态。 */
     private final ConcurrentHashMap<UUID, AuthSession> sessions = new ConcurrentHashMap<>();
-    /** 本次连接内已完成认证的玩家（防止认证完成后被送出时重复触发认证流程）。 */
-    private final java.util.Set<UUID> authenticated = java.util.concurrent.ConcurrentHashMap.newKeySet();
+    /**
+     * 已通过认证的连接：玩家 UUID → 完成认证时的那条连接。
+     *
+     * <p><b>为什么记连接实例，而不是一个布尔标记</b>：认证状态是"按连接"的，而 UUID 在
+     * 离线模式下由昵称推导、可被他人复用。只记 UUID 会同时踩两个坑：
+     * <ul>
+     *   <li>异步完成的认证（密码校验、注册写入）若在玩家断线后才收尾，会留下一条
+     *       "永远已认证"的残留，让下一次同昵称连接白捡免密；</li>
+     *   <li>同名双连接时，旧连接的 {@code DisconnectEvent} 可能晚于新连接的认证完成，
+     *       无条件删除会把新连接刚登记的标记一并清掉（已登录玩家被当成未认证）。</li>
+     * </ul>
+     * 记实例后，判定改为"实例相同才算本连接已认证"，清理改为条件删除，两者都不再互相干扰。
+     */
+    private final ConcurrentHashMap<UUID, Player> authenticatedConnections = new ConcurrentHashMap<>();
     /**
      * PreLogin 阶段判定"会话免密有效"的昵称 → 判定记录（来源 IP + 时间戳）。
      *
@@ -718,8 +731,9 @@ public final class AuthManager {
      */
     public void handleConnected(Player player, String connectedServer) {
         // 同一次连接内已认证完成（如免密直连后触发的目标服连接事件）：
-        // 不再重复启动流程；断线重连时 authenticated 会被清除，重新判定
-        if (authenticated.contains(player.getUniqueId())) {
+        // 不再重复启动流程。判定用<b>连接实例</b>比对：断线重连换的是另一条连接，
+        // 自然不命中，会重新走一遍认证（不会因为 UUID 相同就免密放行）
+        if (authenticatedConnections.get(player.getUniqueId()) == player) {
             // 例外：已认证却被送回了认证服 —— 典型场景是后端服务器关闭/重启时
             // Velocity 把玩家 failover 回 limbo（这个动作不由本插件发起）。
             // 此时默认重新调度转服（可用 server.auto-return-on-fallback 关闭）：
@@ -741,7 +755,9 @@ public final class AuthManager {
             logger.debug("[认证] {} 已在本连接内完成认证，跳过重复处理", player.getUsername());
             return;
         }
-        String ip = player.getRemoteAddress().getAddress().getHostAddress();
+        // 取不到地址时按 null 处理即可：会话免密判定、失败计数与审计都能接受 null，
+        // 而直接解引用 `.getAddress()` 会因为一次异常把玩家卡死在认证流程里
+        String ip = remoteIpOf(player);
         AuthSession session = new AuthSession(player.getUsername(), ip);
         sessions.put(player.getUniqueId(), session);
 
@@ -846,6 +862,11 @@ public final class AuthManager {
             startAuthFlow(player, session);
             return;
         }
+        // 先把本次会话摘掉：玩家到达认证服时会再次触发 ServerConnectedEvent，
+        // 若此时会话还在，handleConnected 会因"已有会话"直接返回 —— 结果是既没有人
+        // 启动注册/登录流程，也没有任何提示（Title/BossBar/Dialog 全无），
+        // 玩家只能干等到认证超时被踢。摘掉后由到达事件正常启动流程。
+        sessions.remove(player.getUniqueId(), session);
         server.getServer(authServer).ifPresentOrElse(target ->
                         player.createConnectionRequest(target).connect().whenComplete((result, throwable) -> {
                             if (throwable != null || result == null || !result.isSuccessful()) {
@@ -1012,7 +1033,7 @@ public final class AuthManager {
             return null;
         }
         // 已认证玩家停留在认证服（如被弹回）：保持原状，不重建认证流程
-        if (authenticated.contains(player.getUniqueId())) {
+        if (authenticatedConnections.get(player.getUniqueId()) == player) {
             logger.debug("[认证] {} 已在本连接内完成认证（停留认证服），无需重建流程",
                     player.getUsername());
             return null;
@@ -1020,7 +1041,7 @@ public final class AuthManager {
         logger.debug("[认证] {} 位于认证服但缺少认证会话，重建认证流程（自愈）", player.getUsername());
         // 清除可能存在的"已认证"残留标记：它会让 handleConnected 静默短路，
         // 导致玩家永远无法重新进入注册/登录流程
-        authenticated.remove(player.getUniqueId());
+        authenticatedConnections.remove(player.getUniqueId(), player);
         premium.revokeVerified(player.getUniqueId());
         handleConnected(player);
         return sessions.get(player.getUniqueId());
@@ -1285,7 +1306,9 @@ public final class AuthManager {
             return;
         }
         String username = player.getUsername();
-        String ip = player.getRemoteAddress().getAddress().getHostAddress();
+        // 取不到地址时按 null 处理：失败计数与审计都能接受 null，直接解引用反而会让
+        // 一次异常打断改密流程（玩家收不到任何反馈）
+        String ip = remoteIpOf(player);
 
         // 新密码：长度/字符集与注册同一套规则
         PasswordPolicy.Violation violation = PasswordPolicy.check(config, newPassword);
@@ -1555,10 +1578,17 @@ public final class AuthManager {
     private void completeAuth(Player player, AuthSession session, String messageKey, boolean passwordVerified) {
         session.allowed = true;
         session.dialogOpen = false;
-        // 先登记"已完成认证"再移除会话：顺序颠倒时，若恰有 ServerConnectedEvent 在窗口内进来，
-        // 会重新走一遍认证流程（离线玩家被二次要求登录）
-        authenticated.add(player.getUniqueId());
-        sessions.remove(player.getUniqueId(), session);
+        // 原子地"消费"本次认证的会话：密码校验与注册写入都在异步链上，玩家可能在完成前
+        // 断线（清理已把会话移除）或重连（会话已被新连接替换）。条件删除返回 false 就说明
+        // 这次认证已不属于任何在线连接 —— 此时绝不能再登记认证标记，否则会留下一条永久
+        // 残留，让下一次同昵称连接被误判为"已通过认证"而免密放行。
+        if (!sessions.remove(player.getUniqueId(), session)) {
+            logger.debug("[认证] {} 的认证会话已失效（断线或被新连接替换），跳过本次认证收尾",
+                    player.getUsername());
+            return;
+        }
+        // 会话已在上一步消费掉，这里只登记"本连接已完成认证"
+        authenticatedConnections.put(player.getUniqueId(), player);
         // 审计：成功路径统一在此记录，事件类型由 messageKey 映射出认证方式
         audit.record(auditActionFor(messageKey), player.getUsername(), player.getUniqueId(),
                 session.ip, auditDetailFor(messageKey));
@@ -1653,12 +1683,17 @@ public final class AuthManager {
         }
     }
 
-    /** 渲染文本键为原始字符串（供 Dialog 正文追加），替换占位符。 */
+    /**
+     * 渲染文本键为原始字符串（供 Dialog 正文追加），替换占位符。
+     *
+     * <p>占位符值必须<b>转义</b>：返回的字符串会被 {@link TextUtil#render(String)} 当作
+     * MiniMessage 原文再解析一次，未转义的值等于让外部文本获得了标签解析能力。
+     */
     private String renderText(String key, Map<String, String> placeholders) {
         String text = messages.raw(key);
         if (placeholders != null) {
             for (Map.Entry<String, String> entry : placeholders.entrySet()) {
-                text = text.replace("{" + entry.getKey() + "}", entry.getValue() == null ? "" : entry.getValue());
+                text = text.replace("{" + entry.getKey() + "}", TextUtil.escape(entry.getValue()));
             }
         }
         return text;
@@ -1751,7 +1786,10 @@ public final class AuthManager {
 
     /** 该连接是否已完成认证（只认显式证据，不靠"无会话"这种间接推断）。 */
     public boolean isAuthenticated(UUID playerId) {
-        if (authenticated.contains(playerId)) {
+        Player connection = authenticatedConnections.get(playerId);
+        // isActive()：连接已断开时，即使断线清理事件还没跑到，也应立刻视为未认证
+        // （对外 API 的语义就是"当前这条连接是否已认证"，认证状态不跨连接保存）
+        if (connection != null && connection.isActive()) {
             return true;
         }
         AuthSession session = sessions.get(playerId);
@@ -1829,14 +1867,25 @@ public final class AuthManager {
     // 清理
     // ---------------------------------------------------------------------
 
-    /** 玩家断开连接清理。 */
-    public void handleDisconnect(String username, UUID playerId) {
+    /**
+     * 玩家断开连接清理。
+     *
+     * @param player 断开的那条连接
+     * @param ip     该连接的来源 IP（可为 null）；用于只清理属于本连接的会话免密标记
+     */
+    public void handleDisconnect(Player player, String ip) {
+        UUID playerId = player.getUniqueId();
+        String username = player.getUsername();
         cleanup(playerId);
-        authenticated.remove(playerId);
+        // 条件删除：同名双连接下，旧连接的断开事件可能晚于新连接的认证完成，
+        // 无条件删除会把新连接刚登记的标记一起清掉
+        authenticatedConnections.remove(playerId, player);
         premium.forget(playerId, username);
 
-        // 会话免密标记：玩家在建立连接前断线时清理（正常路径已由 handleConnected 消费）
-        sessionVerifiedNames.remove(MikuConfig.normalize(username));
+        // 会话免密标记：只清属于本连接来源 IP 的那条 —— 它按昵称存放，
+        // 他人从别的 IP 用同昵称连一次就顺手删掉，会把合法玩家降级成"必须重新输密码"
+        sessionVerifiedNames.computeIfPresent(MikuConfig.normalize(username),
+                (key, mark) -> ip != null && mark.ip().equals(ip) ? null : mark);
     }
 
     private void cleanup(UUID playerId) {

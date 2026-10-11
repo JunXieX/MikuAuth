@@ -648,7 +648,7 @@ class AuthManagerDecisionTest {
         authManager.decideLoginModeAsync("alice", "1.2.3.4").join();
         authManager.handleConnected(player, "limbo");     // 进入认证流程（会话创建）
         // 模拟"会话丢失但玩家还停在认证服"：断线清理会移除会话与认证标记
-        authManager.handleDisconnect("alice", player.getUniqueId());
+        authManager.handleDisconnect(player, "1.2.3.4");
         placeOnServer(player, "limbo");
 
         authManager.handleLoginCommand(player, "definitely-wrong");
