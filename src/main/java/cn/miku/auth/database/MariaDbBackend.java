@@ -222,7 +222,7 @@ final class MariaDbBackend implements SqlBackend {
                     uuid            CHAR(36)     NOT NULL,
                     nickname_lower  VARCHAR(16)  NOT NULL,
                     display_name    VARCHAR(16)  NOT NULL,
-                    password_hash   VARCHAR(100) NULL,
+                    password_hash   VARCHAR(255) NULL,
                     auth_type       VARCHAR(16)  NOT NULL,
                     register_ip     VARCHAR(45)  NULL,
                     register_time   BIGINT       NULL,
@@ -261,6 +261,11 @@ final class MariaDbBackend implements SqlBackend {
     public List<String> schemaStatements() {
         return List.of(
                 playersDdl("miku_players"),
+                // 老库补宽 password_hash：AuthMe 的 $SHA512$ 哈希（8 + 盐 + 1 + 128 位 HEX ≈ 153 字符）
+                // 超过早期的 VARCHAR(100)，迁移写入时会被截断成一个永远校验不过的哈希
+                // （INSERT IGNORE 会把"值过长"降级为警告，报告却显示"迁移成功"）。
+                // 列定义与上面一致时这条语句是空操作，因此可以每次启动执行。
+                "ALTER TABLE miku_players MODIFY COLUMN password_hash VARCHAR(255) NULL",
                 """
                 CREATE TABLE IF NOT EXISTS miku_sessions (
                     nickname_lower VARCHAR(16) NOT NULL,

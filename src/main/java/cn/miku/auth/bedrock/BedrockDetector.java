@@ -1,6 +1,7 @@
 package cn.miku.auth.bedrock;
 
 import java.lang.reflect.Method;
+import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicReference;
 import org.slf4j.Logger;
@@ -93,18 +94,46 @@ public final class BedrockDetector {
         }
     }
 
+    /** 按优先级排列的"取昵称"候选方法名。 */
+    private static final String[] NAME_METHOD_NAMES = {"getCorrectUsername", "getJavaUsername", "getUsername"};
+
+    /**
+     * 每个实现类上可用的"取昵称"方法（只解析一次）。
+     *
+     * <p>{@code Class#getMethod} 带安全检查、还要靠异常兜底去探测缺失的方法名，
+     * 而本方法每次连接都会对 Floodgate 注册表里的每个基岩玩家调用一遍 ——
+     * 缓存后每次比对只剩一次反射调用。类的数量由 Floodgate 决定（通常 1~2 个）。
+     */
+    private static final java.util.concurrent.ConcurrentHashMap<Class<?>, List<Method>> NAME_METHODS =
+            new java.util.concurrent.ConcurrentHashMap<>();
+
     private static boolean matchesName(Object player, String username) {
-        for (String methodName : new String[]{"getCorrectUsername", "getJavaUsername", "getUsername"}) {
+        for (Method method : nameMethods(player.getClass())) {
             try {
-                Object candidate = player.getClass().getMethod(methodName).invoke(player);
+                Object candidate = method.invoke(player);
                 if (candidate instanceof String value && value.equalsIgnoreCase(username)) {
                     return true;
                 }
             } catch (ReflectiveOperationException | RuntimeException | LinkageError ignored) {
-                // 尝试下一个方法名
+                // 换下一个方法名继续比对
             }
         }
         return false;
+    }
+
+    /** 解析并缓存某实现类上可用的取昵称方法。 */
+    private static List<Method> nameMethods(Class<?> type) {
+        return NAME_METHODS.computeIfAbsent(type, ignored -> {
+            List<Method> found = new java.util.ArrayList<>(NAME_METHOD_NAMES.length);
+            for (String methodName : NAME_METHOD_NAMES) {
+                try {
+                    found.add(type.getMethod(methodName));
+                } catch (ReflectiveOperationException | RuntimeException ignoredLookup) {
+                    // 该类没有这个方法：跳过，继续试下一个候选
+                }
+            }
+            return List.copyOf(found);
+        });
     }
 
     // ---------------------------------------------------------------------

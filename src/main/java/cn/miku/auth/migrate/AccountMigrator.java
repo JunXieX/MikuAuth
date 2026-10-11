@@ -363,18 +363,53 @@ public final class AccountMigrator {
             return "jdbc:sqlite:" + trimmed.substring("sqlite:".length());
         }
         if (trimmed.startsWith("mysql://") || trimmed.startsWith("mariadb://")) {
-            URI uri = URI.create(trimmed.replace("mysql://", "mariadb://"));
-            String credentials = uri.getUserInfo() == null ? "" : "?user=" + uri.getUserInfo().replace(":", "&password=");
+            URI uri;
+            try {
+                uri = URI.create(trimmed.replace("mysql://", "mariadb://"));
+            } catch (IllegalArgumentException e) {
+                throw new IllegalArgumentException("迁移位置无法解析为 URL"
+                        + "（账号或口令含 % 等特殊字符时，请改用不含这些字符的临时账号）: "
+                        + maskCredentials(trimmed), e);
+            }
             int port = uri.getPort() > 0 ? uri.getPort() : 3306;
-            return "jdbc:mariadb://" + uri.getHost() + ":" + port + uri.getPath() + credentials;
+            return "jdbc:mariadb://" + uri.getHost() + ":" + port + uri.getPath()
+                    + credentialsQuery(uri.getUserInfo(), trimmed);
         }
         // 兜底：当作 SQLite 文件路径
         return "jdbc:sqlite:" + trimmed;
     }
 
+    /**
+     * 把 {@code user:password@} 形式的凭据转成 JDBC URL 的查询参数。
+     *
+     * <p>只做拆分、不做百分号编码：驱动如何解码查询参数没有实测依据，贸然编码反而可能
+     * 让现在能用的口令（含 {@code @}、{@code :}）失效。代价是口令里若含 {@code & # ? % }
+     * 或空白会破坏连接串 —— 这类口令在旧实现下同样连不上，区别只是现在会明确报错，
+     * 而不是拼出一个把口令截断的地址去连（那会表现为"账号或密码错误"，指向完全错误的方向）。
+     */
+    private static String credentialsQuery(String userInfo, String location) {
+        if (userInfo == null || userInfo.isEmpty()) {
+            return "";
+        }
+        int split = userInfo.indexOf(':');
+        String account = split < 0 ? userInfo : userInfo.substring(0, split);
+        String password = split < 0 ? "" : userInfo.substring(split + 1);
+        if (BROKEN_IN_URL.matcher(account).find() || BROKEN_IN_URL.matcher(password).find()) {
+            throw new IllegalArgumentException("迁移位置的账号或口令含 & # ? % 或空白字符，会破坏连接串；"
+                    + "请改用不含这些字符的临时账号: " + maskCredentials(location));
+        }
+        return "?user=" + account + (password.isEmpty() ? "" : "&password=" + password);
+    }
+
+    /** 会破坏 JDBC URL 查询串的字符。 */
+    private static final java.util.regex.Pattern BROKEN_IN_URL =
+            java.util.regex.Pattern.compile("[&#?%\\s]");
+
     /** 日志里不暴露数据库口令。 */
     private static String maskCredentials(String url) {
-        return url.replaceAll("password=[^&]*", "password=***");
+        return url.replaceAll("(?i)password=[^&\\s]*", "password=***")
+                // jdbc:...://user:pass@host 这类内联凭据（管理员直接传 jdbc: 串时出现）
+                .replaceAll("//[^/@\\s:]*:[^/@\\s]*@", "//***:***@");
     }
 
     /**
