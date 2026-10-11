@@ -219,7 +219,7 @@ admin:
     - "<yellow>/mikuauth unlock <玩家|IP></yellow> <dark_gray>-</dark_gray> <gray>解除登录失败的临时封禁</gray>"
     - "<yellow>/mikuauth limit [数量]</yellow> <dark_gray>-</dark_gray> <gray>查看/设置每 IP 账号上限</gray>"
     - "<yellow>/mikuauth reload</yellow> <dark_gray>-</dark_gray> <gray>重载配置与语言文件</gray>"
-    - "<gray>破坏性操作（deletepassword / unbind / setpassword / passwd / limit <数量> / 非 dry-run 的 migrate）需 <yellow>--confirm</yellow>，并要求 <yellow>mikuauth.admin.write</yellow> 权限节点。</gray>"
+    - "<gray>写操作（unlock / migrate / deletepassword / unbind / setpassword / passwd / limit <数量>）需要 <yellow>mikuauth.admin.write</yellow> 权限节点；其中不可撤销的还需 <yellow>--confirm</yellow>（仅 <white>--dry-run</white> 的 migrate 例外）。</gray>"
 
   # 参数不足时的用法提示。{usage} = 用法
   usage: "<red>用法：{usage}"
@@ -295,6 +295,8 @@ admin:
     no-password-tip: "<yellow>其中 {count} 个账号的密码算法无法沿用（如 Argon2），这些玩家需重新设置密码（管理员可用 setpassword）。"
     unknown-source: "<red>未知的迁移来源：{source}</red> <gray>可选：{sources}</gray>"
     failed: "<red>迁移失败：{reason}"
+    # 迁移失败明细（逐条显示）。{detail} = 具体失败原因
+    failure-line: "<red>×</red> <gray>{detail}</gray>"
     dry-run-tip: "<aqua>以上为试运行结果，未写入任何数据。确认无误后去掉 --dry-run 再执行一次。"
     not-allowed: "<red>位置 {location} 不在允许范围内。</red>\n<gray>当前白名单：</gray><yellow>{allowed}</yellow><gray>（config.yml 的 migrate.allowed-prefixes，留空表示不限制）</gray>"
     security-tip: "<gray>提示：迁移来的旧算法哈希会在玩家首次登录时自动升级为 BCrypt；如需强制全员重置，可用 unbind/deletepassword。"

@@ -72,6 +72,7 @@ MikuMC 系列插件交流群：1105054380
 
 > ⚠ 从 3.4.0 起破坏性操作额外要求 `--confirm`（防误粘贴、误回车）。
 > 只持有 `mikuauth.admin` 的账号执行写操作时会收到明确的缺权限提示，补发写节点即可。
+> 子命令别名（`setpass` / `delpass` / `password`）与主名走完全相同的权限与确认校验。
 
 | 管理子命令 | 用途 | 需要 |
 | --- | --- | --- |
@@ -79,14 +80,14 @@ MikuMC 系列插件交流群：1105054380
 | `/mikuauth audit <玩家>` / `audit ip <IP>` | 查询登录审计日志 | 只读 |
 | `/mikuauth diagnose <玩家>` | 排查某昵称进不来时，回放完整判定过程 | 只读 |
 | `/mikuauth reload` | 重载配置与文本文件 | 只读 |
-| `/mikuauth unlock <玩家\|IP>` | 解除登录失败的临时封禁 | 只读 |
+| `/mikuauth unlock <玩家\|IP> --confirm` | 解除登录失败的临时封禁 | 写 + 确认 |
 | `/mikuauth limit [数量]` | 查看每 IP 账号上限 | 只读 |
 | `/mikuauth limit <数量> --confirm` | 临时调整每 IP 账号上限 | 写 + 确认 |
 | `/mikuauth passwd <玩家> --confirm` | 交互式重置密码（密码在聊天栏输入，不会留在命令历史） | 写 + 确认 |
 | `/mikuauth setpassword <玩家> <新密码> --confirm` | 直接设置密码（保留账号） | 写 + 确认 |
 | `/mikuauth deletepassword <玩家> --confirm` | 删除密码（账号回到未注册状态，昵称可被重新注册） | 写 + 确认 |
 | `/mikuauth unbind <玩家> --confirm` | 解除正版绑定 | 写 + 确认 |
-| `/mikuauth migrate <来源> <位置> [--dry-run]` | 迁移账号（来源：`authme` / `librelogin` / `limboauth`）；不带 `--dry-run` 时需要 `--confirm` | 写 + 确认 |
+| `/mikuauth migrate <来源> <位置> [--dry-run]` | 迁移账号（来源：`authme` / `librelogin` / `limboauth`）；`--dry-run` 只统计、不写库 | 写（`--dry-run` 时无需确认） |
 
 未认证玩家会被限制在认证服内，且只能使用登录/注册相关命令。
 

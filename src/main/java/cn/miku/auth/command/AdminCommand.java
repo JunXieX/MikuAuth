@@ -52,11 +52,12 @@ public final class AdminCommand implements SimpleCommand {
     /** 只读权限节点：能查看账号、审计与诊断。 */
     private static final String READ_PERMISSION = "mikuauth.admin";
     /**
-     * 写权限节点：执行破坏性操作所必需。
+     * 写权限节点：执行会改动插件/账号状态的操作所必需（破坏性操作还要额外 {@code --confirm}）。
      *
      * <p>与只读节点分离，好让服主把"能看"和"能改"分给不同的人（客服只发只读节点）。
      * <b>注意</b>：这意味着原先只有 {@code mikuauth.admin} 的管理员在执行破坏性操作时
      * 会收到明确的缺权限提示——按提示补发 {@code mikuauth.admin.write} 即可，不是静默失效。
+     * 哪些子命令属哪一级由 {@link #accessFor} 统一判定（含别名），不再有第二份清单。
      */
     private static final String WRITE_PERMISSION = "mikuauth.admin.write";
 
@@ -75,7 +76,10 @@ public final class AdminCommand implements SimpleCommand {
             sendHelp(invocation, messages);
             return;
         }
-        String sub = args[0].toLowerCase(Locale.ROOT);
+        // 别名先归一化：权限判定与执行分支必须基于同一个主名。
+        // 别名过去只出现在执行分支里、权限判定用的是另一份主名清单，于是
+        // setpass / delpass / password 绕过了写权限与 --confirm（详见 canonicalSub）
+        String sub = canonicalSub(args[0].toLowerCase(Locale.ROOT));
         // 未认证玩家的写操作一律拒绝。
         // AuthListener 会在认证前放行 /mikuauth（本意只是允许 reload 之类的只读操作），
         // 而这里若只校验权限节点，在离线模式下（身份键由昵称推导）攻击者只要抢在管理员
@@ -90,14 +94,14 @@ public final class AdminCommand implements SimpleCommand {
         // 读 / 写分权 + 破坏性操作二次确认。
         // 同一子命令按"本次参数"判定读还是写：limit 不带参数只是查看，migrate 带 --dry-run 不写库，
         // 若按子命令名一刀切，"看一眼当前配额"也会被要求 --confirm。
-        boolean destructive = isDestructive(sub, args);
-        String required = destructive ? WRITE_PERMISSION : READ_PERMISSION;
+        Access access = accessFor(sub, args);
+        String required = access == Access.READ_ONLY ? READ_PERMISSION : WRITE_PERMISSION;
         if (!invocation.source().hasPermission(required)) {
             invocation.source().sendMessage(messages.prefixed("admin.need-permission",
                     Map.of("node", required)));
             return;
         }
-        if (destructive && !hasFlag(args, "--confirm")) {
+        if (access == Access.WRITE_CONFIRM && !hasFlag(args, "--confirm")) {
             StringBuilder rerun = new StringBuilder("/mikuauth");
             for (String arg : args) {
                 rerun.append(' ').append(arg);
@@ -116,11 +120,11 @@ public final class AdminCommand implements SimpleCommand {
                     () -> migrate(invocation, args));
             case "diagnose" -> requireArgs(invocation, args, 2, "diagnose <玩家>",
                     () -> diagnose(invocation, args[1]));
-            case "deletepassword", "delpass" -> requireArgs(invocation, args, 2, "deletepassword <玩家>",
+            case "deletepassword" -> requireArgs(invocation, args, 2, "deletepassword <玩家>",
                     () -> deletePassword(invocation, args[1]));
-            case "setpassword", "setpass" -> requireArgs(invocation, args, 3, "setpassword <玩家> <新密码>",
+            case "setpassword" -> requireArgs(invocation, args, 3, "setpassword <玩家> <新密码>",
                     () -> setPassword(invocation, args));
-            case "passwd", "password" -> requireArgs(invocation, args, 2, "passwd <玩家>",
+            case "passwd" -> requireArgs(invocation, args, 2, "passwd <玩家>",
                     () -> passwd(invocation, args[1]));
             case "unbind" -> requireArgs(invocation, args, 2, "unbind <玩家>",
                     () -> unbindPremium(invocation, args[1]));
@@ -471,7 +475,10 @@ public final class AdminCommand implements SimpleCommand {
             }
             if (report.hasFailures()) {
                 for (String failure : report.failures()) {
-                    source.sendMessage(plugin.renderAdmin("<red>×</red> <gray>" + failure + "</gray>"));
+                    // 走 messages.component：占位符值会被转义，
+                    // 异常文案里若带 <...> 也不会被当成 MiniMessage 标签（手写拼接会绕过这层保护）
+                    source.sendMessage(plugin.messages().component("admin.migrate.failure-line",
+                            Map.of("detail", failure)));
                 }
             }
             if (dryRun) {
@@ -483,16 +490,48 @@ public final class AdminCommand implements SimpleCommand {
     }
 
     /**
-     * 本次调用是否属于"破坏性写操作"（需写权限 + {@code --confirm}）。
-     *
-     * <p>判定依据是参数而不只是子命令名，理由见调用点。
+     * 子命令的权限等级。
      */
-    private static boolean isDestructive(String sub, String[] args) {
-        return switch (sub) {
-            case "deletepassword", "unbind", "setpassword", "passwd" -> true;
-            case "limit" -> args.length >= 2;
-            case "migrate" -> !hasFlag(args, "--dry-run");
-            default -> false;
+    enum Access {
+        /** 只读查询：只需 {@code mikuauth.admin}。 */
+        READ_ONLY,
+        /** 写操作：需 {@code mikuauth.admin.write}（当前仅"仅试运行"的 migrate 属于此级）。 */
+        WRITE,
+        /** 破坏性写操作：需写权限 + {@code --confirm}（防误粘贴、误回车）。 */
+        WRITE_CONFIRM
+    }
+
+    /**
+     * 子命令别名 → 主名。
+     *
+     * <p><b>必须在所有判定之前统一归一化</b>：权限判定（{@link #accessFor}）与执行分支
+     * （{@link #execute(Invocation)} 的 switch）过去各自维护一份"哪些名字算写操作"的清单，
+     * 别名（{@code setpass} / {@code delpass} / {@code password}）只出现在执行分支里，
+     * 于是它们绕过了写权限与 {@code --confirm} —— 只持有只读节点的账号即可重置任意账号的密码。
+     * 现在别名只在<b>这一处</b>映射，两处判定不可能再漂移。
+     */
+    static String canonicalSub(String raw) {
+        return switch (raw) {
+            case "delpass" -> "deletepassword";
+            case "setpass" -> "setpassword";
+            case "password" -> "passwd";
+            default -> raw;
+        };
+    }
+
+    /**
+     * 子命令所需的权限等级（按归一化后的主名判定）。
+     *
+     * <p>判定依据包含参数而不只是子命令名，理由见调用点：{@code limit} 不带参数只是查看；
+     * {@code migrate} 带 {@code --dry-run} 不写库、但仍会让服务端以自身身份连接目标库，
+     * 因此降一档为"写"，不再只要求只读节点。
+     */
+    static Access accessFor(String sub, String[] args) {
+        return switch (canonicalSub(sub)) {
+            case "deletepassword", "unbind", "setpassword", "passwd", "unlock" -> Access.WRITE_CONFIRM;
+            case "limit" -> args.length >= 2 ? Access.WRITE_CONFIRM : Access.READ_ONLY;
+            case "migrate" -> hasFlag(args, "--dry-run") ? Access.WRITE : Access.WRITE_CONFIRM;
+            default -> Access.READ_ONLY;
         };
     }
 
