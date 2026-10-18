@@ -87,7 +87,10 @@ jobs:
           with open('README.md', encoding='utf-8') as f:
               body = f.read().rstrip() + '\n'
 
-          # 摘要 = README 第一个二级标题之前，第一段纯英文 + 第一段含中文，用 ` ｜ ` 连接
+          # 摘要 = README 第一个二级标题之前的第一段**纯英文**。
+          # 注意：Modrinth 对项目描述有 required 级校验 project_description_non_english——
+          # 中英混排一样会被判为非英文（实测 "英文 ｜ 中文" 被 400 拒绝），因此摘要只能是英文段。
+          # README 正文（body）不受该限制，中文内容照常同步到项目页。
           head = body.split('\n## ', 1)[0]
           paras = []
           for raw in re.split(r'\n\s*\n', head):
@@ -96,17 +99,13 @@ jobs:
                   paras.append(p)
           cjk = re.compile(r'[\u4e00-\u9fff]')
           en = next((p for p in paras if not cjk.search(p)), '')
-          zh = next((p for p in paras if cjk.search(p)), '')
-          # 保险：README 开头必须同时有英文段与中文段才同步，缺一则跳过本次同步（告警但不失败）——
-          # 绝不把纯中文内容覆盖到项目页（Modrinth 审核硬要求摘要/描述含英文）；
-          # 跳过只影响项目页文案，不让构建变红（README 为中文文档，属预期状态）。
-          if not en or not zh:
-              print('[skip] README 开头缺少%s段落，本次不同步（Modrinth 审核要求摘要/描述含英文）。'
-                    % ('英文' if not en else '中文'))
+          # 没有英文段就跳过：绝不把中文描述写到项目页（Modrinth 会拒绝，且描述项是必填英文）
+          if not en:
+              print('[skip] README 开头没有英文段落，本次不同步（Modrinth 要求项目描述为英文）。')
               sys.exit(0)
-          desc = '%s ｜ %s' % (en, zh)
+          desc = en
           if len(desc) > 256:
-              print('警告：摘要 %d 字符超限，已截断（请把 README 开头两句写短）' % len(desc))
+              print('警告：摘要 %d 字符超限，已截断（请把 README 开头的英文段写短）' % len(desc))
               desc = desc[:255] + '…'
 
           def call(method, path, data=None, ctype=None):
@@ -135,9 +134,17 @@ jobs:
           if st in (200, 204):
               print('已同步 README → Modrinth（body %d 字符，摘要 %d 字符）' % (len(body), len(desc)))
               sys.exit(0)
-          if st == 400 and 'validation nags' in str(resp):
-              print('项目正在审核中（status=%s），Modrinth 暂锁编辑；审核结束后重跑本步骤即可。'
-                    % p.get('status'))
+          if st == 400 and 'nags' in str(resp):
+              # 项目校验未通过。Modrinth 的措辞是 "resolve required project validation messages"
+              # （nags 里的 severity 分 suggestion / required）：
+              #   - 仅 suggestion（如尚未放置画廊图）：属可选完善项，不改动项目页，不让构建变红；
+              #   - 含 required（如描述非英文）：必须人工处理，报错并让构建变红，避免被静默忽略。
+              print('项目校验未通过（status=%s）: %s' % (p.get('status'), resp.get('error')))
+              if 'resolve required' in str(resp):
+                  print('存在 required 级校验项（见上方 nags 中 severity=required 的项），'
+                        '请先在 Modrinth 项目页处理，再重跑本步骤。')
+                  sys.exit(1)
+              print('仅有建议级校验项，本次不改动项目页。')
               sys.exit(0)
           print('同步失败:', st, resp)
           sys.exit(1)
