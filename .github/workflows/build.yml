@@ -50,7 +50,10 @@ jobs:
         with:
           files: target/MikuAuth-*.jar
           prerelease: ${{ contains(github.ref_name, 'Beta') }}
-          generate_release_notes: true
+          # 更新日志以仓库内的 RELEASE_NOTES.md 为准（发布前更新该文件）。
+          # 此前用 generate_release_notes 由 GitHub 自动生成，而下面的 Modrinth
+          # 上传步骤读的就是 Release 正文，于是 Modrinth 只能拿到一行 "Full Changelog" 链接。
+          body_path: RELEASE_NOTES.md
 
       # ------------------------------------------------------------------
       # README → Modrinth 项目页：**面向用户的文档只维护 README.md 一份**，
