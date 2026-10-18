@@ -3,6 +3,8 @@
 Velocity 代理端登录验证插件：Java 正版免密、基岩版免密、同 IP 会话免密、原版对话框登录，
 支持 SQLite / MariaDB / MySQL，可迁移 AuthMe、LibreLogin、LimboAuth 的账号。
 
+Velocity login plugin: passwordless premium and Bedrock login, IP session login, native dialog UI, SQLite / MariaDB / MySQL.
+
 ## 声明
 
 本项目为 MikuMC 服务器原创插件，公开给大众免费使用，MikuMC 服务器与作者 JunXieX 享有项目著作权，本项目非开源项目，请注意。
