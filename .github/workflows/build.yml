@@ -135,11 +135,16 @@ jobs:
               print('已同步 README → Modrinth（body %d 字符，摘要 %d 字符）' % (len(body), len(desc)))
               sys.exit(0)
           if st == 400 and 'nags' in str(resp):
-              # 项目校验未通过。Modrinth 的措辞是 "resolve required project validation messages"
-              # （nags 里的 severity 分 suggestion / required）：
-              #   - 仅 suggestion（如尚未放置画廊图）：属可选完善项，不改动项目页，不让构建变红；
-              #   - 含 required（如描述非英文）：必须人工处理，报错并让构建变红，避免被静默忽略。
+              # 项目校验未通过（Modrinth 的措辞是 "resolve required project validation messages"
+              # + nags 列表，severity 分 suggestion / required）：
+              #   - status=processing（项目正在审核）：Modrinth 锁住编辑，此时改不了 ——
+              #     只告警、不让构建变红，审核结束后重跑本步骤即可（原设计意图，此处修正判定措辞）；
+              #   - 其余情形若含 required 级 nag：属必须人工处理的问题，报错并让构建变红，
+              #     避免像以前那样被静默吞掉。
               print('项目校验未通过（status=%s）: %s' % (p.get('status'), resp.get('error')))
+              if p.get('status') == 'processing':
+                  print('项目正在审核中，Modrinth 暂锁编辑；审核结束后重跑本步骤即可同步。')
+                  sys.exit(0)
               if 'resolve required' in str(resp):
                   print('存在 required 级校验项（见上方 nags 中 severity=required 的项），'
                         '请先在 Modrinth 项目页处理，再重跑本步骤。')
