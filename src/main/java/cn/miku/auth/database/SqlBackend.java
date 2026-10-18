@@ -27,8 +27,26 @@ interface SqlBackend extends AutoCloseable {
     /** 归还连接。SQLite 为空操作；MariaDB 归还到池。 */
     void release(Connection connection);
 
-    /** 建表与索引语句（各方言自行给出）。 */
+    /**
+     * 建表与索引语句（各方言自行给出）。
+     *
+     * <p>这一类语句失败<b>必须</b>让插件明确停用：结构没建出来，后续所有读写都会失败。
+     * 老库的"按需修复"请放进 {@link #repairStatements(Connection)}。
+     */
     List<String> schemaStatements();
+
+    /**
+     * 老库结构修复语句（按需）：执行前自行探测是否真的需要修复，不需要时返回空列表。
+     *
+     * <p>与 {@link #schemaStatements()} 分开的理由：修复是<b>尽力而为</b>的——
+     * 例如给老库补宽某列，可能因数据库账号缺少 ALTER 权限、或表很大而失败。
+     * 那种情况记一条 WARN 继续启动，远比"整个插件启动失败、玩家全部登不上"可接受。
+     *
+     * <p>默认实现返回空列表：只有确实存在方言差异（如 MySQL 家族的列宽）才需要重写。
+     */
+    default List<String> repairStatements(Connection connection) throws SQLException {
+        return List.of();
+    }
 
     /**
      * 账号表建表语句（结构定义的唯一来源）。

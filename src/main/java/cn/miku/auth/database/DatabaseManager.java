@@ -163,11 +163,41 @@ public final class DatabaseManager implements AuthRepository, AuditRepository, A
                     }
                 }
             }
+            // 老库按需修复：与建表分开，**失败只记 WARN**。
+            // 修复往往依赖额外权限（如 ALTER），或因表很大而耗时；
+            // 让它把插件整个拖停用（玩家全部登不上）远比"某个列没扩宽"严重
+            runRepairs(connection);
         } finally {
             backend.release(connection);
         }
         if (logger != null) {
             logger.info("[数据库] 已就绪：{}", backend.describe());
+        }
+    }
+
+    /**
+     * 执行后端给出的"按需修复"语句（如给老库补宽 {@code password_hash}）。
+     *
+     * <p><b>全部失败都只记 WARN</b>，绝不向上抛：修复依赖额外权限（ALTER），
+     * 也可能因表很大而超时，让这些原因把插件拖成"停用"是不可接受的——
+     * 后果是全部玩家都登不上，而问题本身只是"某个列没扩宽"。
+     */
+    private void runRepairs(Connection connection) {
+        List<String> repairs;
+        try {
+            repairs = backend.repairStatements(connection);
+        } catch (SQLException e) {
+            logger.warn("[数据库] 结构修复探测失败（不影响启动）: {}", e.getMessage());
+            return;
+        }
+        for (String repair : repairs) {
+            try (Statement statement = connection.createStatement()) {
+                statement.executeUpdate(repair);
+                logger.warn("[数据库] 已执行老库结构修复: {}", repair);
+            } catch (SQLException e) {
+                logger.warn("[数据库] 结构修复未能执行（不影响启动；请检查数据库账号是否有 ALTER 权限）: {}"
+                        + " —— {}", repair, e.getMessage());
+            }
         }
     }
 

@@ -5,6 +5,7 @@ import com.zaxxer.hikari.HikariDataSource;
 
 import java.sql.Connection;
 import java.sql.Driver;
+import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
 import java.util.List;
@@ -261,11 +262,6 @@ final class MariaDbBackend implements SqlBackend {
     public List<String> schemaStatements() {
         return List.of(
                 playersDdl("miku_players"),
-                // 老库补宽 password_hash：AuthMe 的 $SHA512$ 哈希（8 + 盐 + 1 + 128 位 HEX ≈ 153 字符）
-                // 超过早期的 VARCHAR(100)，迁移写入时会被截断成一个永远校验不过的哈希
-                // （INSERT IGNORE 会把"值过长"降级为警告，报告却显示"迁移成功"）。
-                // 列定义与上面一致时这条语句是空操作，因此可以每次启动执行。
-                "ALTER TABLE miku_players MODIFY COLUMN password_hash VARCHAR(255) NULL",
                 """
                 CREATE TABLE IF NOT EXISTS miku_sessions (
                     nickname_lower VARCHAR(16) NOT NULL,
@@ -279,6 +275,40 @@ final class MariaDbBackend implements SqlBackend {
                 // MariaDB 支持 CREATE INDEX IF NOT EXISTS；MySQL 会报"duplicate key name"，
                 // 由 DatabaseManager 识别为可忽略的结构错误。
                 "CREATE INDEX IF NOT EXISTS idx_audit_ip ON miku_audit_log (ip, id)");
+    }
+
+    /** password_hash 的目标宽度（AuthMe 的 {@code $SHA512$} 哈希约 153 字符）。 */
+    private static final int PASSWORD_HASH_COLUMN_LENGTH = 255;
+
+    /**
+     * 老库按需修复：把 {@code password_hash} 扩宽到能容纳 AuthMe 的 {@code $SHA512$} 哈希。
+     *
+     * <p>只在<b>确实更窄</b>时才返回 ALTER —— 先查 information_schema 拿当前宽度：
+     * 读不到（列不存在、或不是字符类型）就什么都不做，盲改会把 TEXT 之类的列截断成 255 字符。
+     * 健康库因此完全不产生 DDL，既不依赖 ALTER 权限，也没有每次启动重建表的开销。
+     */
+    @Override
+    public List<String> repairStatements(Connection connection) throws SQLException {
+        String sql = "SELECT CHARACTER_MAXIMUM_LENGTH FROM information_schema.COLUMNS"
+                + " WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'miku_players'"
+                + " AND COLUMN_NAME = 'password_hash'";
+        try (Statement statement = connection.createStatement();
+             ResultSet rs = statement.executeQuery(sql)) {
+            if (!rs.next()) {
+                return List.of();
+            }
+            int currentLength = rs.getInt(1);
+            if (rs.wasNull() || currentLength >= PASSWORD_HASH_COLUMN_LENGTH) {
+                return List.of();
+            }
+            if (logger != null) {
+                logger.warn("[数据库] password_hash 当前宽度 {} 低于 {}（AuthMe 的 $SHA512$ 哈希更长，"
+                                + "迁移写入会被静默截断），正在扩宽",
+                        currentLength, PASSWORD_HASH_COLUMN_LENGTH);
+            }
+            return List.of("ALTER TABLE miku_players MODIFY COLUMN password_hash VARCHAR("
+                    + PASSWORD_HASH_COLUMN_LENGTH + ") NULL");
+        }
     }
 
     @Override

@@ -731,7 +731,7 @@ public final class AuthManager {
      */
     public void handleConnected(Player player, String connectedServer) {
         // 同一次连接内已认证完成（如免密直连后触发的目标服连接事件）：
-        // 不再重复启动流程。判定用<b>连接实例</b>比对：断线重连换的是另一条连接，
+        // 不再重复启动流程。判定用"连接实例"比对：断线重连换的是另一条连接，
         // 自然不命中，会重新走一遍认证（不会因为 UUID 相同就免密放行）
         if (authenticatedConnections.get(player.getUniqueId()) == player) {
             // 例外：已认证却被送回了认证服 —— 典型场景是后端服务器关闭/重启时
@@ -799,7 +799,8 @@ public final class AuthManager {
         if (config.bedrockAutoLogin()
                 && BedrockDetector.isBedrockPlayer(player.getUniqueId())) {
             logger.debug("[认证] {} 基岩版免密通过", player.getUsername());
-            completeAuth(player, session, "auth.auto.bedrock", false);
+            // touchAccount=false：基岩玩家不写库（详见 completeAuth 的说明）
+            completeAuth(player, session, "auth.auto.bedrock", false, false);
             return;
         }
         // 4) 需要密码认证：必须位于认证服（隔离边界），否则先送回认证服
@@ -1576,6 +1577,20 @@ public final class AuthManager {
      *                         而且失败计数会被免密登录顺手清零。
      */
     private void completeAuth(Player player, AuthSession session, String messageKey, boolean passwordVerified) {
+        completeAuth(player, session, messageKey, passwordVerified, true);
+    }
+
+    /**
+     * 完成认证（带"是否写账号行"开关）。
+     *
+     * @param touchAccount 是否写"最近登录 + 会话"（{@code finishLogin}）。
+     *                     <b>基岩版必须传 false</b>：基岩玩家按设计<b>不写库</b>，
+     *                     它的昵称又是 Floodgate 生成的、理论上可能与某个离线账号同名，
+     *                     于是这条 UPDATE 会把别人的行刷上基岩玩家的最近登录 IP/时间
+     *                     （污染"最近登录"与按 IP 的配额统计）。
+     */
+    private void completeAuth(Player player, AuthSession session, String messageKey, boolean passwordVerified,
+                              boolean touchAccount) {
         session.allowed = true;
         session.dialogOpen = false;
         // 原子地"消费"本次认证的会话：密码校验与注册写入都在异步链上，玩家可能在完成前
@@ -1603,7 +1618,9 @@ public final class AuthManager {
         long expiresAt = passwordVerified && config.sessionEnabled()
                 ? System.currentTimeMillis() + config.sessionDurationMinutes() * 60_000L
                 : 0L;
-        withFallback(database.finishLogin(player.getUsername(), session.ip, expiresAt), null, "登录收尾");
+        if (touchAccount) {
+            withFallback(database.finishLogin(player.getUsername(), session.ip, expiresAt), null, "登录收尾");
+        }
 
         display.showSuccess(player, messageKey + ".title", messageKey + ".subtitle",
                 Map.of("player", player.getUsername()));
