@@ -39,6 +39,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: MikuAuth
+          retention-days: 1
           # 不用 target/*.jar：shade 会把替换前的原始 jar 留成 original-MikuAuth-<版本>.jar，
           # 用通配会把它一起传上去，用户可能误取到未打包依赖的那个
           path: target/MikuAuth-*.jar
