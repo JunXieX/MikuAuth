@@ -1,5 +1,5 @@
 name: MikuAuth
-version: '${project.version}'
+version: '${version}'
 main: cn.miku.auth.paper.MikuAuthPlugin
 api-version: '26.2'
 authors: [JunXieX]

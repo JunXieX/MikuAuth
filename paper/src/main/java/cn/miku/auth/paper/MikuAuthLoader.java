@@ -11,10 +11,16 @@ import org.eclipse.aether.repository.RemoteRepository;
  * 运行期依赖装载器：插件 jar 不 shade 任何第三方库。
  *
  * <p>由 {@code paper-plugin.yml} 的 {@code loader:} 指定；服务端启动时先把这里声明的构件
- * 下到本地缓存再加进插件类加载器，成品 jar 只有几十 KB，也不会和别的插件打架。
+ * 下到 {@code <服务端>/libraries} 再加进插件类加载器，成品 jar 只有几十 KB。
+ *
+ * <p><b>这里只声明公共层真正引用的三类库</b>：BCrypt（密码哈希）、HikariCP（MariaDB 连接池，
+ * 走 SQLite 时不会加载）、SnakeYAML（配置/语言文件解析）。JDBC 驱动不在这里 ——
+ * 公共层的 {@code JdbcDriverLoader} 会按 {@code database.type} 只下载真正需要的那一个，
+ * 并校验 SHA-256，避免"装个 SQLite 服却下了三个驱动"。
  *
  * <p>离线服：这些构件首次启动会联网下载；无法联网时请预先把 jar 放进
- * {@code ~/.m2/repository} 的标准坐标目录（解析器只认那个布局）。
+ * {@code <服务端>/libraries/<group>/<artifact>/<version>/}（同名 .jar 与 .pom 各一份，
+ * 这个目录才是加载器的真实缓存位置），或放进 {@code ~/.m2/repository} 的标准坐标目录。
  */
 public final class MikuAuthLoader implements PluginLoader {
 
@@ -31,14 +37,11 @@ public final class MikuAuthLoader implements PluginLoader {
                 "aliyun", "default", "https://maven.aliyun.com/repository/public/").build());
         resolver.addRepository(new RemoteRepository.Builder(
                 "papermc", "default", "https://repo.papermc.io/repository/maven-public/").build());
-        // 密码哈希（与代理端同一算法，账号库可共用）
+        // 与 gradle.properties 保持一致（构建脚本里由 Gradle 校验过，这里写死运行期坐标）
         resolver.addDependency(new Dependency(new DefaultArtifact("at.favre.lib:bcrypt:0.10.2"), "runtime"));
         resolver.addDependency(new Dependency(new DefaultArtifact("at.favre.lib:bytes:1.5.0"), "runtime"));
-        // SQLite JDBC
-        resolver.addDependency(new Dependency(new DefaultArtifact("org.xerial:sqlite-jdbc:3.46.1.3"), "runtime"));
-        // 网络数据库（与代理端共用账号库时用）；连哪个由 database.type 决定
-        resolver.addDependency(new Dependency(new DefaultArtifact("org.mariadb.jdbc:mariadb-java-client:3.4.1"), "runtime"));
-        resolver.addDependency(new Dependency(new DefaultArtifact("com.mysql:mysql-connector-j:8.4.0"), "runtime"));
+        resolver.addDependency(new Dependency(new DefaultArtifact("com.zaxxer:HikariCP:5.1.0"), "runtime"));
+        resolver.addDependency(new Dependency(new DefaultArtifact("org.yaml:snakeyaml:2.2"), "runtime"));
         classpathBuilder.addLibrary(resolver);
     }
 }

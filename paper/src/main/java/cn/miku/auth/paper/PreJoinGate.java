@@ -1,5 +1,12 @@
 package cn.miku.auth.paper;
 
+import cn.miku.auth.audit.AuditAction;
+import cn.miku.auth.database.DatabaseManager;
+import cn.miku.auth.database.StoredPlayer;
+import cn.miku.auth.security.LoginThrottle;
+import cn.miku.auth.security.PasswordHasher;
+import cn.miku.auth.security.PasswordPolicy;
+import cn.miku.auth.util.UuidUtil;
 import com.destroystokyo.paper.event.player.PlayerConnectionCloseEvent;
 import com.destroystokyo.paper.profile.PlayerProfile;
 import io.papermc.paper.connection.PlayerConfigurationConnection;
@@ -25,7 +32,9 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Optional;
 import java.util.UUID;
+import java.util.concurrent.CompletionException;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
@@ -36,43 +45,36 @@ import java.util.concurrent.atomic.AtomicBoolean;
  * 进服前认证闸门：只实现「Pre」模式。
  *
  * <p><b>时序</b>：{@link AsyncPlayerConnectionConfigureEvent} 由 Paper 内部的
- * {@code PaperConfigurationTask} 在「注册表同步完成之后、{@code PrepareSpawnTask}（进世界的最后一步）之前」
- * 触发，事件本身跑在专用虚拟线程上，服务端会等监听器返回才继续这条连接
- * （见 Paper 侧 {@code PaperConfigurationTask#start}：{@code event.callEvent()} 之后才
- * {@code finishCurrentTask}）。因此这里可以：
+ * {@code PaperConfigurationTask} 在「注册表同步完成之后、进世界的最后一步之前」触发，
+ * 事件跑在专用虚拟线程上，服务端会等监听器返回才继续这条连接。因此这里可以：
  * <ol>
  *   <li>用 {@link PlayerConfigurationConnection#getAudience()} 把原生对话框发给玩家；</li>
  *   <li>阻塞等待玩家提交（超时由配置决定）；</li>
  *   <li>认证通过就直接返回 —— 连接继续，玩家进入世界；失败则重发对话框或断开。</li>
  * </ol>
  *
- * <p><b>为什么可以阻塞</b>：阻塞的是这名玩家自己的虚拟线程，不占用主线程 tick；
- * 虚拟线程阻塞几乎不消耗资源，几十人同时挂着也不会撑爆线程池。超时必须有界，否则连接会永久悬挂。
+ * <p><b>为什么可以阻塞</b>：阻塞的是这名玩家自己的虚拟线程，不占用主线程 tick。
+ * 跨线程的账号读写一律走公共层的 {@code DatabaseManager}（内部单线程串行 + 异步返回），
+ * 这里只在这条虚拟线程上 {@code join()} 结果，不碰其它玩家的流程。
  *
  * <p><b>三个必须照做的细节</b>（都是 Paper 侧的硬约束，配错就是"框点了没反应"）：
  * <ul>
  *   <li>{@code afterAction = WAIT_FOR_RESPONSE}：默认值是 {@code CLOSE}，点一下按钮客户端就把框关掉，
- *       玩家在校验期间只会看到空屏；{@code WAIT_FOR_RESPONSE} 会切到"等待响应"屏，再由服务端
- *       关框或换框，反馈才不会丢。</li>
+ *       玩家在校验期间只会看到空屏；{@code WAIT_FOR_RESPONSE} 会切到"等待响应"屏。</li>
  *   <li>结束时必须 {@code closeDialog()}：否则客户端停在"等待响应"屏，玩家进世界后屏幕还是那块。</li>
  *   <li>文本输入必须显式 {@code maxLength}：默认只有 32，超出部分客户端根本不让输入，
  *       于是"代理端注册的长密码"在这边永远登不上。</li>
  * </ul>
- *
- * <p><b>只支持一种模式</b>：不做"进服后冻结再登录"的 Post 模式 —— 服务端一旦让玩家进入世界，
- * 就无法在不接管实体的情况下保证他看不到地形。
  */
 public final class PreJoinGate implements Listener {
 
     /** 提交动作的标识（客户端点击后由 {@link PlayerCustomClickEvent} 带回）。 */
     static final Key SUBMIT = Key.key("mikuauth", "submit");
 
-    /** 对话框协议自 1.21.6（协议号 771）起才有 custom click / dialog 包。 */
+    /** 对话框协议自 1.21.6（协议号 771）起才有 dialog / custom click 包。 */
     private static final int DIALOG_MIN_PROTOCOL = 771;
 
     private final MikuAuthPlugin plugin;
-    /** 跨连接的失败计数与临时封禁（断线重连绕不过去）。 */
-    private final Throttle throttle;
     /**
      * 正在配置阶段等待认证的连接。
      *
@@ -85,17 +87,6 @@ public final class PreJoinGate implements Listener {
 
     PreJoinGate(MikuAuthPlugin plugin) {
         this.plugin = plugin;
-        this.throttle = new Throttle(plugin.config());
-    }
-
-    /** 供主类心跳调用：清理过期计数。 */
-    void tick() {
-        throttle.purge();
-    }
-
-    /** 管理员解锁（玩家名或 IP）。 */
-    boolean unlock(String subject) {
-        return throttle.unlock(subject);
     }
 
     /** 一条连接的认证会话。 */
@@ -104,7 +95,7 @@ public final class PreJoinGate implements Listener {
         final String name;
         final String ip;
         final PlayerConfigurationConnection connection;
-        final String textKey;
+        final boolean registering;
         final CompletableFuture<Void> done = new CompletableFuture<>();
         /** 会话是否已有结论（成功 / 断开 / 超时），保证只结算一次。 */
         private final AtomicBoolean finished = new AtomicBoolean();
@@ -112,16 +103,12 @@ public final class PreJoinGate implements Listener {
         private final AtomicBoolean working = new AtomicBoolean();
         volatile int tries;
 
-        Session(UUID id, String name, String ip, PlayerConfigurationConnection connection, String textKey) {
+        Session(UUID id, String name, String ip, PlayerConfigurationConnection connection, boolean registering) {
             this.id = id;
             this.name = name;
             this.ip = ip;
             this.connection = connection;
-            this.textKey = textKey;
-        }
-
-        boolean registering() {
-            return "register".equals(textKey);
+            this.registering = registering;
         }
 
         boolean finished() {
@@ -152,37 +139,44 @@ public final class PreJoinGate implements Listener {
         PlayerProfile profile = connection.getProfile();
         String name = profile == null ? null : profile.getName();
         if (name == null || name.isEmpty()) {
-            fail(connection, "kick.internal-error");
+            fail(connection, "kick.auth-error", Map.of());
             return;
         }
         // 低于 1.21.6 的客户端收不到对话框包：与其让他在空屏上干等一分钟，不如直接说明原因
         if (!clientSupportsDialog(profile.getId())) {
-            fail(connection, "kick.no-dialog-client");
+            fail(connection, "kick.no-dialog-client", Map.of());
             return;
         }
         String ip = addressOf(connection);
         // 被封禁的 IP/账号在弹框之前就拒绝，避免白送一次哈希计算
-        Throttle.Lock lock = throttle.check(ip, name);
+        LoginThrottle.Lock lock = plugin.throttle().check(ip, name);
         if (lock != null) {
-            fail(connection, "kick.locked", Map.of("minutes", String.valueOf(lock.minutes())));
+            fail(connection, "error.locked", Map.of("minutes", String.valueOf(lock.remainingMinutes())));
             return;
         }
-        Store.Account account = plugin.store().find(name);
-        String textKey = account != null && account.hasPassword() ? "login" : "register";
-        Session session = new Session(profile.getId(), name, ip, connection, textKey);
+
+        Optional<StoredPlayer> account = findAccount(name);
+        if (account == null) {
+            // 数据库不可用：不能把玩家推去"注册"（会撞唯一约束），直接说明情况
+            fail(connection, "kick.auth-error", Map.of());
+            return;
+        }
+        boolean registering = account.map(player -> !player.hasPassword()).orElse(true);
+        Session session = new Session(profile.getId(), name, ip, connection, registering);
         sessions.put(connection, session);
         try {
             showDialog(session, null);
             // 阻塞到提交成功 / 超次断开 / 超时；服务端在此期间不会让玩家进入世界
-            session.done.get(plugin.config().timeoutSeconds(), TimeUnit.SECONDS);
+            session.done.get(timeoutSeconds(), TimeUnit.SECONDS);
         } catch (TimeoutException timeout) {
             if (session.finish()) {
-                fail(connection, "kick.timeout");
+                plugin.audit().record(AuditAction.KICK_TIMEOUT, name, profile.getId(), ip, "配置阶段认证超时");
+                fail(connection, "kick.auth-timeout", Map.of());
             }
         } catch (Exception e) {
-            plugin.getLogger().warning("[认证] " + name + " 的配置阶段认证异常: " + e);
+            plugin.log().warn("[认证] {} 的配置阶段认证异常: {}", name, e.toString());
             if (session.finish()) {
-                fail(connection, "kick.internal-error");
+                fail(connection, "kick.auth-error", Map.of());
             }
         } finally {
             session.finish();
@@ -192,7 +186,7 @@ public final class PreJoinGate implements Listener {
         }
     }
 
-    /** 对话框提交（自定义点击）。事件可能在主线程触发，因此这里只解析参数，校验与落库全部异步。 */
+    /** 对话框提交（自定义点击）。事件在主线程触发，因此这里只解析参数，校验与落库全部异步。 */
     @EventHandler(priority = EventPriority.NORMAL)
     public void onCustomClick(PlayerCustomClickEvent event) {
         if (!SUBMIT.equals(event.getIdentifier())) {
@@ -210,26 +204,25 @@ public final class PreJoinGate implements Listener {
         String password = view == null ? null : view.getText("password");
         String confirm = view == null ? null : view.getText("confirm");
         if (password == null) {
-            // 这一行是排障锚点：点得到按钮但拿不到输入值时，日志能直接指认是"没有 payload"
-            // 还是"payload 里没有 password 字段"，不用再猜客户端行为
-            plugin.getLogger().warning("[认证] " + session.name + " 的对话框提交缺少 password，payload="
-                    + (view == null ? "<无响应数据>" : view.payload().string()));
+            // 排障锚点：点得到按钮但拿不到输入值时，日志直接指认是"没有 payload"还是"缺字段"
+            plugin.log().warn("[认证] {} 的对话框提交缺少 password，payload={}", session.name,
+                    view == null ? "<无响应数据>" : view.payload().string());
         }
         if (!session.beginSubmit()) {
             return;
         }
-        boolean register = session.registering();
-        // BCrypt 校验是 CPU 密集的、SQLite 是文件 IO，都不能压在主线程上（这条事件就在主线程）
+        boolean registering = session.registering;
+        // BCrypt 是 CPU 密集的、SQLite 是文件 IO：都不能压在主线程（这条事件就在主线程）
         runAsync(() -> {
             try {
-                if (register) {
+                if (registering) {
                     submitRegister(session, password, confirm);
                 } else {
                     submitLogin(session, password);
                 }
             } catch (RuntimeException e) {
-                plugin.getLogger().warning("[认证] " + session.name + " 的提交处理异常: " + e);
-                retry(session, plugin.messages().raw("error.server-busy"), Map.of());
+                plugin.log().warn("[认证] {} 的提交处理异常: {}", session.name, e.toString());
+                retry(session, "error.server-busy", Map.of());
             } finally {
                 session.endSubmit();
             }
@@ -268,115 +261,134 @@ public final class PreJoinGate implements Listener {
     // ------------------------------------------------------------------
 
     private void submitRegister(Session session, String password, String confirm) {
-        Crypto.Violation violation = Crypto.check(plugin.config(), password);
+        PasswordPolicy.Violation violation = PasswordPolicy.check(plugin.config(), password);
         if (violation != null) {
-            retry(session, plugin.messages().raw(violation.messageKey()), violation.placeholders());
+            retry(session, violation.messageKey(), violation.placeholders());
             return;
         }
         if (!password.equals(confirm)) {
-            retry(session, plugin.messages().raw("error.password-mismatch"), Map.of());
+            retry(session, "error.password-mismatch", Map.of());
             return;
         }
         String hash;
         try {
-            hash = Crypto.hash(password, plugin.config().bcryptCost());
+            hash = PasswordHasher.hash(password, plugin.config().bcryptCost());
         } catch (RuntimeException e) {
-            plugin.getLogger().warning("[注册] " + session.name + " 的密码哈希失败: " + e.getMessage());
-            retry(session, plugin.messages().raw("error.server-busy"), Map.of());
+            plugin.log().warn("[注册] {} 的密码哈希失败: {}", session.name, e.toString());
+            retry(session, "error.server-busy", Map.of());
             return;
         }
-        Store.Result result = plugin.store().register(Crypto.offlineUuid(session.name), session.name,
-                hash, session.ip, plugin.config().maxAccountsPerIp());
+        DatabaseManager.RegisterResult result;
+        try {
+            result = plugin.db().registerWithIpLimit(UuidUtil.offlineUuid(session.name), session.name, hash,
+                    StoredPlayer.TYPE_OFFLINE, session.ip, plugin.config().maxAccountsPerIp()).join();
+        } catch (RuntimeException e) {
+            plugin.log().warn("[注册] {} 写库失败: {}", session.name, e.toString());
+            retry(session, "error.server-busy", Map.of());
+            return;
+        }
         switch (result) {
-            case OK -> succeed(session, "auth.success.register", "REGISTER", "注册并登录（进服前）");
-            case DUPLICATE -> retry(session, plugin.messages().raw("error.already-registered"), Map.of());
+            case OK -> succeed(session, "auth.success.register", AuditAction.REGISTER, "注册并登录（进服前）");
+            case DUPLICATE -> retry(session, "error.already-registered", Map.of());
             case IP_LIMIT -> {
-                plugin.store().audit(session.name, session.id, session.ip, "REJECT_IP_LIMIT",
+                plugin.audit().record(AuditAction.REJECT_IP_LIMIT, session.name, session.id, session.ip,
                         "该 IP 名下账号数已达上限 " + plugin.config().maxAccountsPerIp());
-                retry(session, plugin.messages().raw("error.ip-limit"), Map.of());
+                retry(session, "error.ip-limit", Map.of());
             }
-            default -> retry(session, plugin.messages().raw("error.server-busy"), Map.of());
+            default -> retry(session, "error.server-busy", Map.of());
         }
     }
 
     private void submitLogin(Session session, String password) {
         if (password == null || password.isEmpty()) {
-            retry(session, plugin.messages().raw("error.password-empty"), Map.of());
+            retry(session, "error.password-empty", Map.of());
             return;
         }
-        Store.Account account = plugin.store().find(session.name);
-        if (account == null || !account.hasPassword()) {
-            retry(session, plugin.messages().raw("error.not-registered"), Map.of());
+        Optional<StoredPlayer> account = findAccount(session.name);
+        if (account == null) {
+            retry(session, "error.server-busy", Map.of());
             return;
         }
+        if (account.isEmpty() || !account.get().hasPassword()) {
+            retry(session, "error.not-registered", Map.of());
+            return;
+        }
+        String stored = account.get().passwordHash();
         boolean verified;
         try {
-            verified = Crypto.verify(password, account.passwordHash());
+            verified = PasswordHasher.verify(password, stored);
         } catch (RuntimeException e) {
             verified = false;
         }
         if (verified) {
             // 迁移来的旧算法在首次成功登录时就地升级为 BCrypt，玩家无感
-            if (Crypto.needsUpgrade(account.passwordHash())) {
+            if (PasswordHasher.needsUpgrade(stored)) {
                 try {
-                    plugin.store().updatePassword(session.name, Crypto.hash(password, plugin.config().bcryptCost()));
-                    plugin.getLogger().info("[登录] " + session.name + " 的密码哈希已升级为 BCrypt");
+                    String upgraded = PasswordHasher.hash(password, plugin.config().bcryptCost());
+                    plugin.db().updatePassword(session.name, upgraded).join();
+                    plugin.log().info("[登录] {} 的密码哈希已升级为 BCrypt", session.name);
                 } catch (RuntimeException e) {
-                    plugin.getLogger().warning("[登录] " + session.name + " 的哈希升级失败: " + e.getMessage());
+                    plugin.log().warn("[登录] {} 的哈希升级失败: {}", session.name, e.toString());
                 }
             }
-            succeed(session, "auth.success.login", "LOGIN_SUCCESS", "密码登录（进服前）");
+            succeed(session, "auth.success.login", AuditAction.LOGIN_SUCCESS, "密码登录（进服前）");
             return;
         }
         session.tries++;
         // 跨会话计数：即使玩家重连，失败次数依然累计
-        Throttle.Lock lock = throttle.recordFailure(session.ip, session.name);
-        plugin.store().audit(session.name, session.id, session.ip, "LOGIN_FAIL",
-                "密码错误（本次连接第 " + session.tries + " 次）"
-                        + (lock != null ? "，已触发临时封禁" : ""));
+        LoginThrottle.Lock lock = plugin.throttle().recordFailure(session.ip, session.name);
+        plugin.audit().record(AuditAction.LOGIN_FAIL, session.name, session.id, session.ip,
+                "密码错误（本次连接第 " + session.tries + " 次）" + (lock != null ? "，已触发临时封禁" : ""));
         if (lock != null) {
             if (session.finish()) {
-                session.connection.disconnect(plugin.messages().component("kick.locked",
-                        Map.of("minutes", String.valueOf(lock.minutes()))));
+                fail(session.connection, "error.locked",
+                        Map.of("minutes", String.valueOf(lock.remainingMinutes())));
                 session.done.complete(null);
             }
             return;
         }
-        if (session.tries >= plugin.config().maxTries()) {
+        if (session.tries >= plugin.config().maxLoginTries()) {
             if (session.finish()) {
-                session.connection.disconnect(plugin.messages().component("kick.too-many-tries"));
+                fail(session.connection, "kick.too-many-tries", Map.of());
                 session.done.complete(null);
             }
             return;
         }
-        retry(session, plugin.messages().raw("error.password-wrong"), Map.of());
+        retry(session, "error.password-wrong", Map.of());
     }
 
     /** 认证通过：记审计 + 放行（返回后连接继续，玩家进入世界）。 */
-    private void succeed(Session session, String messageKey, String action, String detail) {
+    private void succeed(Session session, String messageKey, AuditAction action, String detail) {
         if (!session.finish()) {
             return;
         }
-        throttle.reset(session.name);
-        plugin.store().finishLogin(session.name, session.ip);
-        plugin.store().audit(session.name, session.id, session.ip, action, detail);
-        // Audience#sendMessage 在配置阶段的实现是空方法（PaperPlayerConfigurationConnection 没有覆写它），
-        // 直接发等于丢弃；存起来等 PlayerJoinEvent 补发。
+        plugin.throttle().reset(session.ip, session.name);
+        try {
+            // 纸端不做同 IP 会话免密（每次进服都要认证），因此会话有效期传 0
+            plugin.db().finishLogin(session.name, session.ip, 0L).join();
+        } catch (RuntimeException e) {
+            plugin.log().warn("[登录] {} 记录最近登录失败（不影响本次放行）: {}", session.name, e.toString());
+        }
+        plugin.audit().record(action, session.name, session.id, session.ip, detail);
+        // 配置阶段没有聊天栏：Audience#sendMessage 在那里是空实现，存起来等进世界补发
         pendingChat.put(session.name.toLowerCase(Locale.ROOT),
                 plugin.messages().component(messageKey + ".chat", Map.of("player", session.name)));
         session.done.complete(null);
     }
 
-    /** 失败：把错误拼进正文后重发同一个对话框。 */
-    private void retry(Session session, String errorRaw, Map<String, String> placeholders) {
+    private void retry(Session session, String errorKey, Map<String, String> placeholders) {
         if (session.finished()) {
             return;
         }
-        showDialog(session, render(errorRaw, placeholders));
+        showDialog(session, render(plugin.messages().raw(errorKey), placeholders));
     }
 
+    // ------------------------------------------------------------------
+    // 对话框
+    // ------------------------------------------------------------------
+
     private void showDialog(Session session, String errorLine) {
-        // 发包线程不敏感，但对话框构建会碰服务端注册表，统一回主线程做，避免跨线程访问注册表
+        // 发包线程不敏感，但对话框构建会碰服务端注册表，统一回主线程做
         if (Bukkit.isPrimaryThread()) {
             draw(session, errorLine);
         } else {
@@ -389,9 +401,9 @@ public final class PreJoinGate implements Listener {
             session.connection.getAudience().showDialog(buildDialog(session, errorLine));
         } catch (Throwable t) {
             // 对话框发不出去等于玩家永远没法认证：立刻收尾，别让他干等超时
-            plugin.getLogger().warning("[认证] " + session.name + " 的对话框发送失败: " + t);
+            plugin.log().warn("[认证] {} 的对话框发送失败: {}", session.name, t.toString());
             if (session.finish()) {
-                fail(session.connection, "kick.internal-error");
+                fail(session.connection, "kick.auth-error", Map.of());
                 session.done.complete(null);
             }
         }
@@ -399,26 +411,25 @@ public final class PreJoinGate implements Listener {
 
     private Dialog buildDialog(Session session, String errorLine) {
         var config = plugin.config();
-        boolean register = session.registering();
-        String base = register ? "dialog.register" : "dialog.login";
+        String base = session.registering ? "dialog.register" : "dialog.login";
         Map<String, String> placeholders = Map.of(
                 "player", session.name,
-                "seconds", String.valueOf(config.timeoutSeconds()));
+                "seconds", String.valueOf(timeoutSeconds()));
 
         Component body = plugin.messages().component(base + ".body", placeholders);
         if (errorLine != null && !errorLine.isEmpty()) {
             body = Component.text().append(body).append(Component.newline())
                     .append(plugin.messages().component("prefix")).append(Component.text(errorLine)).build();
         }
-        // 文本框上限必须跟着注册策略走：Paper 的默认值只有 32，配置放宽到 64 时
-        // 玩家根本输不进第 33 个字符，代理端注册的账号会永久登录失败
+        // 文本框上限必须跟着注册策略走：Paper 的默认值只有 32，配置放宽后
+        // 玩家根本输不进第 33 个字符，代理端注册的长密码账号会永久登录失败
         int maxLength = Math.max(config.minPasswordLength(), config.maxPasswordLength());
-        List<DialogInput> inputs = new ArrayList<>(register ? 2 : 1);
+        List<DialogInput> inputs = new ArrayList<>(session.registering ? 2 : 1);
         inputs.add(DialogInput.text("password",
                         plugin.messages().component(base + ".input-label", placeholders))
                 .maxLength(maxLength)
                 .build());
-        if (register) {
+        if (session.registering) {
             inputs.add(DialogInput.text("confirm",
                             plugin.messages().component(base + ".confirm-label", placeholders))
                     .maxLength(maxLength)
@@ -426,7 +437,7 @@ public final class PreJoinGate implements Listener {
         }
 
         DialogBase dialogBase = DialogBase.builder(plugin.messages().component(base + ".title", placeholders))
-                .canCloseWithEscape(config.allowCloseWithEscape())
+                .canCloseWithEscape(config.dialogCanCloseWithEscape())
                 .pause(false)                              // 单人游戏才有意义，服务器上显式关掉
                 .afterAction(DialogBase.DialogAfterAction.WAIT_FOR_RESPONSE)
                 .body(List.of(DialogBody.plainMessage(body)))
@@ -437,9 +448,8 @@ public final class PreJoinGate implements Listener {
                 .tooltip(plugin.messages().component(base + ".button-tooltip", placeholders))
                 .width(160)
                 // additions 传 null：这个形参是"待解析的 NBT"，非 null 时 Paper 会先解析成 Tag
-                // 再断言必须是 compound（CustomClickActionImpl 的构造器），传字符串会被当成 SNBT
-                // 解析出一个 string tag，直接抛 IllegalArgumentException。登录/注册由服务端会话决定，
-                // 不需要附加数据；玩家填的输入值由客户端自己并进回传的 compound。
+                // 再断言必须是 compound，传字符串会被当成 SNBT 解析出 string tag 直接抛异常。
+                // 登录/注册由服务端会话决定，不需要附加数据；玩家填的输入值由客户端并入回传的 compound。
                 .action(DialogAction.customClick(SUBMIT, null))
                 .build();
 
@@ -461,16 +471,33 @@ public final class PreJoinGate implements Listener {
     // 工具
     // ------------------------------------------------------------------
 
-    /** 断开并附上提示（配置阶段只能靠断开画面传达信息）。 */
-    private void fail(PlayerConfigurationConnection connection, String key) {
-        fail(connection, key, Map.of());
+    /**
+     * 配置阶段等待上限（秒）。
+     *
+     * <p>共用配置里 {@code login.timeout-seconds: 0} 表示"不限时"，那是代理端的语义（由会话状态机兜底）；
+     * 纸端一旦不限时，连接会永久停在配置阶段，服务端与玩家都没有退路，因此这里必须给一个有界的上限。
+     */
+    private int timeoutSeconds() {
+        int configured = plugin.config().authTimeoutSeconds();
+        return configured > 0 ? configured : 600;
     }
 
+    /** 查账号；数据库故障返回 null（与"查无此人"区分开）。 */
+    private Optional<StoredPlayer> findAccount(String name) {
+        try {
+            return plugin.db().findPlayer(name).join();
+        } catch (RuntimeException e) {
+            plugin.log().warn("[认证] {} 的账号查询失败: {}", name, e.toString());
+            return null;
+        }
+    }
+
+    /** 断开并附上提示（配置阶段只能靠断开画面传达信息）。 */
     private void fail(PlayerConfigurationConnection connection, String key, Map<String, String> placeholders) {
         try {
             connection.disconnect(plugin.messages().component(key, placeholders));
         } catch (Throwable t) {
-            plugin.getLogger().warning("[认证] 断开连接时出错: " + t);
+            plugin.log().warn("[认证] 断开连接时出错: {}", t.toString());
         }
     }
 
@@ -497,7 +524,6 @@ public final class PreJoinGate implements Listener {
         try {
             plugin.getServer().getAsyncScheduler().runNow(plugin, task -> action.run());
         } catch (RuntimeException e) {
-            // 调度器已关闭（插件正在卸载）时退化为同步执行，保证会话不会悬挂
             action.run();
         }
     }

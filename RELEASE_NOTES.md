@@ -1,71 +1,60 @@
-MikuAuth 3.8.6 更新日志
+MikuAuth 3.9.0 更新日志
 
-本版是 Paper 版「进服前对话框」的一次深度自检修复：对照 Paper 26.3 的
-`paper-api`/服务端实现逐条核对 API 语义，并参照 AuthMe 已发布的同功能实现
-（`PreJoinDialogService` + `PaperDialogFlowListener`）补齐差异。共修 8 处，其中 4 处会直接
-导致「框点了没反应」或「能注册但登不上」。代理端（Velocity）除版本号外无行为变化。
+本版不动认证流程，改的是**代码怎么组织**：代理端（Velocity）与纸端（Paper）此前各写一套业务逻辑，
+现在收敛成一个公共模块，两端只保留平台适配层；构建从 Maven 换成 Gradle。
+代理端与纸端共用同一个版本号、同一份配置文件、同一份语言文件。
 
-## 修复
+## 为什么改
 
-### Paper：对话框点击后立刻被关掉，玩家看不到任何反馈
+同一套规则被抄了两遍，代价已经付过：
 
-按钮动作完成后客户端按 `after_action` 决定下一步，**默认值是 `CLOSE`**，也就是点一下就把框关了。
-玩家在校验期间只看到空屏，误以为没点上而反复点击；错误重发时还会闪一下。
-改为 `WAIT_FOR_RESPONSE`（切到"等待响应"屏，由服务端关框或换框），并在会话结束时显式
-`closeDialog()` —— 少了这一步，客户端会一直停在"等待响应"屏上。
+- 代理端对话框的输入框上限早已跟随 `registration.max-password-length`，
+  纸端复制品漏了这一句 → 3.8.6 才补上"长密码输不进"；
+- 两套 `messages.yml` 各自维护，已经出现"写了没人调"的键漂移；
+- 密码策略在代理端有单测（`PasswordPolicyTest`），在纸端被内联进工具类，没有测试覆盖。
 
-影响：点提交后不再闪屏、不再重复提交，成功进服时屏幕能正常收起。
+## 结构
 
-### Paper：输入框只允许 32 个字符，长密码永远输不进去
+```
+MikuAuth/
+├── common/    平台无关业务层：密码策略与哈希、失败计数、数据访问与建表、
+│              配置与文本渲染、正版/基岩判定、账号迁移、离线 UUID
+├── velocity/  代理端：事件、命令、DialogService（PacketEvents 发包）、PreAuthGate
+└── paper/     纸端：配置阶段闸门、原生 Dialog、Brigadier 命令、日志适配
+```
 
-`DialogInput.text(...)` 的 `maxLength` **默认 32**，而配置项 `registration.max-password-length`
-可以放到 128。于是经代理端用 40 位密码注册的账号，在这边输入框里根本打不满，
-提交上去永远是截断值 → 每次都是"密码错误"，且没有任何提示说明原因。
-现在输入框上限跟随配置。
+纸端删掉了自己那份 `Crypto` / `Store` / `Throttle` / `Messages` / `PaperConfig`，
+改用公共层的 `PasswordHasher` / `PasswordPolicy` / `DatabaseManager` / `LoginThrottle` /
+MikuConfig` / `MikuMessages`。因此纸端**顺带**获得此前只有代理端才有的能力：
 
-影响：放宽密码长度后老账号仍可登录；不再出现"密码明明对却登不上"。
+- **MariaDB / MySQL 账号库**（`database.type`，与代理端共用同一张表）；
+- **按需下载 JDBC 驱动**（`JdbcDriverLoader`：类路径 → 数据目录 `libs/` 缓存 → 镜像下载 + SHA-256 校验），
+  不再需要把三个驱动都塞进加载器；
+- **更完整的审计与失败计数**（`AuditLogger` / `LoginThrottle`，含跨连接封禁与 IP/账号双维度）。
 
-### Paper：密码校验与数据库读写跑在主线程
+公共层不再依赖任何日志门面：新增 `LogSink` 接口，代理端用 slf4j 适配、纸端用
+`java.util.logging` 适配。纸端也因此不再需要自带一个文本渲染器。
 
-`PlayerCustomClickEvent` 由服务端在主线程（`packetProcessor`）派发，而原实现在回调里
-直接做 BCrypt 校验和 JDBC 读写。BCrypt cost 10 单次约 60~100ms，20 人同时登录就是数秒的
-全服卡顿，且 SQLite 是文件 IO。改为回调只解析参数、校验与落库全部投递异步调度器。
+## 配置与数据
 
-影响：多人同时首次进服不再卡服。
+- `config.yml`、`messages.yml` **只有一份**（由 `common` 提供）。纸端读到的是同一份文件，
+  与代理端相关的段落（认证服、正版验证、会话免密等）在纸端不生效，可原样保留。
+- 新增 `dialog.allow-close-with-escape`（默认 `false`，仅纸端生效）：
+  按 Esc 关掉对话框后玩家既看不到聊天栏也无法重开，只能等超时被断开。
+- 纸端数据库文件名改由 `database.file` 决定（默认 `database.db`，与代理端一致）。
+  **首次启动会把旧的 `auth.db` 自动改名为 `database.db`**（连同 `-wal`/`-shm`），账号数据不受影响。
 
-### Paper：账号库只有一条连接，却没有串行化
+## 构建
 
-`Store` 的注释写着"全部调用都投递到异步线程串行执行"，实际上没有任何锁 ——
-配置阶段的虚拟线程、主线程回调、定时清理三方并发使用同一条 JDBC 连接。
-一旦并发 `prepareStatement` 抛异常，`find()` 会静默返回 null，老玩家被判成"未注册"，
-弹注册框，再被唯一约束顶回"已注册"，形成无解循环。
-现在所有公开方法同一把锁串行，并把数据库异常写进日志而不是丢掉。
-
-影响：并发登录稳定；数据库故障能被看见，而不是伪装成"账号不存在"。
-
-### Paper：登录成功提示在配置阶段发不出去，被静默丢弃
-
-Adventure 的 `Audience#sendMessage` 默认是空方法，配置阶段的 Audience 没有覆写它 ——
-在配置阶段发聊天等于丢进黑洞。改为把提示存起来，`PlayerJoinEvent` 时补发。
-
-影响：进服后能看到"登录成功"提示。
-
-### 其他
-
-- **同名二次连接会顶掉正在等待的会话**：会话表原本以玩家 UUID 为键，客户端重连或双开时
-  新会话覆盖旧会话，旧连接的虚拟线程只能干等到超时。改为以连接实例为键。
-- **对话框阶段掉线后要等满超时**：客户端在对话框阶段断开时没有事件唤醒等待中的线程。
-  新增 `PlayerConnectionCloseEvent` 处理，断开即释放。
-- **ViaVersion 下老客户端必然超时**：低于 1.21.6（协议 771）的客户端收不到对话框包，
-  原实现让它在空屏上等满 60 秒再断。现在检测到协议不足直接断开并说明原因。
-- 提交动作的 payload 改传 `null`（Paper 文档标注"不需要附加数据时传 null"），
-  不再依赖任何 SNBT 解析；玩家填写的输入值由客户端并入回传的 compound。
-- 删除 Paper 版死配置 `display.title`（无任何调用点）；`/mikuauth accounts` 的文案
-  与统计口径对齐（统计的是最近登录 IP 下的账号数）。
+- Maven → Gradle：提交 `gradlew` 与 wrapper，命令 `./gradlew build`（成品在 `build/dist`）。
+- 版本唯一来源是 `gradle.properties` 的 `version`；源码里的 `MikuAuthPlugin.VERSION`
+  （`@Plugin` 注解需要编译期常量）由 `checkVersionConstant` 任务校验，改漏了构建直接失败。
+- CI 一次构建同时产出 `MikuAuth-<版本>.jar`（代理端）与 `MikuAuth-Paper-<版本>.jar`（纸端），
+  两个构件版本号一致。
 
 ## 升级说明
 
-- Paper：替换 `MikuAuth-Paper-3.8.6.jar` 后重启即可，配置与数据无需改动。
-  上一版新增的 `display` 段已无作用，可删可留。
-- 代理端：直接替换 jar，行为与 3.8.5 一致。
-- 完整改动：https://github.com/JunXieX/MikuAuth/compare/v3.8.5...v3.8.6
+- 代理端：替换 jar 即可，配置键未改名。
+- 纸端：替换 jar 后重启；`auth.db` → `database.db` 自动迁移；旧 `messages.yml` 可保留
+  （缺失键回退内置默认值），也可删除让它重新生成。
+- 完整改动：https://github.com/JunXieX/MikuAuth/compare/v3.8.6...v3.9.0

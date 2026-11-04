@@ -11,63 +11,54 @@ on:
         description: "只在 Modrinth 做一次只读校验（检查令牌/项目可达性，不上传任何东西）"
         type: boolean
         default: false
-
 jobs:
+  # 三个模块（common / velocity / paper）在一次 Gradle 构建里一起编、一起测、一起发：
+  # 代理端与纸端共用同一份公共层，版本号也来自 gradle.properties 的同一个值。
   build:
-    # Paper 构件先构建并上传，build 再取回来一起挂到 Release 上：
-    # 这样"同一次发版的两个 jar"版本号天然一致，也不用在两个作业里各构建一次
-    needs: paper
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Download paper artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: MikuAuth-Paper
-          path: paper-dist
+      - uses: actions/checkout@v7
 
       - name: Set up JDK 25
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v6
         with:
           java-version: '25'
           distribution: 'temurin'
-          cache: maven
 
-      # verify 会连带执行测试（surefire），比 package 更能挡住“编译过但测试挂”的提交。
-      # MariaDbBackendTest 在未提供 -Dmikuauth.test.mariadb.host 时会自动跳过。
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v5
+
+      # build 会连带 check（JUnit）+ 两个 shadowJar；dist 把两个成品收进 build/dist，
+      # 供后面的 artifact / Release / Modrinth 统一取用，避免把 -plain.jar 也带上。
+      # Windows 侧提交的文件不带可执行位（git 在 Windows 上不记录 mode），
+      # 这里补一次 chmod：否则 runner 上直接 "./gradlew: Permission denied"（exit 126）。
       - name: Build and test
-        run: mvn -B -ntp verify
+        run: |
+          chmod +x gradlew
+          ./gradlew build dist --no-daemon
 
       - name: Show artifacts
-        run: ls -lh target/*.jar
+        run: ls -lh build/dist
 
       - name: Upload artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: MikuAuth
           retention-days: 1
-          # 不用 target/*.jar：shade 会把替换前的原始 jar 留成 original-MikuAuth-<版本>.jar，
-          # 用通配会把它一起传上去，用户可能误取到未打包依赖的那个
-          path: target/MikuAuth-*.jar
+          path: build/dist/*.jar
           if-no-files-found: error
 
       - name: Publish Release
         if: startsWith(github.ref, 'refs/tags/')
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
-          # 两个构件一起发：代理端 + Paper 端，版本号一致
-          files: |
-            target/MikuAuth-*.jar
-            paper-dist/MikuAuth-Paper-*.jar
+          files: build/dist/*.jar
           prerelease: ${{ contains(github.ref_name, 'Beta') }}
           # 更新日志以仓库内的 RELEASE_NOTES.md 为准（发布前更新该文件）。
-          # 此前用 generate_release_notes 由 GitHub 自动生成，而下面的 Modrinth
-          # 上传步骤读的就是 Release 正文，于是 Modrinth 只能拿到一行 "Full Changelog" 链接。
+          # Modrinth 上传步骤读的也是 Release 正文，因此两边不会各写一份。
           body_path: RELEASE_NOTES.md
-
       # ------------------------------------------------------------------
       # README → Modrinth 项目页：**面向用户的文档只维护 README.md 一份**，
       # 这里把它的原文同步成 Modrinth 的 body，并把开头两句（英文段+中文段）拼成摘要。
@@ -249,10 +240,11 @@ jobs:
           except Exception as exc:
               print('取 GitHub Release 正文失败，改用兜底 changelog:', repr(exc))
 
-          jars = [p for p in glob.glob('target/MikuAuth-*.jar')
-                  if 'original-' not in os.path.basename(p)]
+          # 只取代理端那一个：dist 里还有 MikuAuth-Paper-*.jar，Modrinth 的 velocity 版本不能混进纸端 jar
+          jars = [p for p in glob.glob('build/dist/MikuAuth-[0-9]*.jar')
+                  if 'plain' not in os.path.basename(p)]
           if len(jars) != 1:
-              print('期望恰好一个 shade 后的 jar，实际:', jars)
+              print('期望恰好一个代理端成品 jar，实际:', jars)
               sys.exit(1)
           jar = jars[0]
           with open(jar, 'rb') as f:
@@ -298,31 +290,3 @@ jobs:
               print('上传失败:', status, resp)
               sys.exit(1)
           PY
-
-  # ------------------------------------------------------------------
-  # Paper 版（paper/ 是独立 Maven 工程，与代理端各出各的 jar）
-  # 不进 Release、不传 Modrinth：先只做编译与测试门禁，产物作为 workflow artifact 供验收。
-  # ------------------------------------------------------------------
-  paper:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Set up JDK 25
-        uses: actions/setup-java@v4
-        with:
-          java-version: '25'
-          distribution: 'temurin'
-          cache: maven
-
-      - name: Build paper module
-        working-directory: paper
-        run: mvn -B -ntp verify
-
-      - name: Upload paper artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: MikuAuth-Paper
-          retention-days: 1
-          path: paper/target/MikuAuth-Paper-*.jar
-          if-no-files-found: error
