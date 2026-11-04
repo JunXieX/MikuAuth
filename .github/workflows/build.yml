@@ -286,3 +286,31 @@ jobs:
               print('上传失败:', status, resp)
               sys.exit(1)
           PY
+
+  # ------------------------------------------------------------------
+  # Paper 版（paper/ 是独立 Maven 工程，与代理端各出各的 jar）
+  # 不进 Release、不传 Modrinth：先只做编译与测试门禁，产物作为 workflow artifact 供验收。
+  # ------------------------------------------------------------------
+  paper:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 25
+        uses: actions/setup-java@v4
+        with:
+          java-version: '25'
+          distribution: 'temurin'
+          cache: maven
+
+      - name: Build paper module
+        working-directory: paper
+        run: mvn -B -ntp verify
+
+      - name: Upload paper artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: MikuAuth-Paper
+          retention-days: 1
+          path: paper/target/MikuAuth-Paper-*.jar
+          if-no-files-found: error

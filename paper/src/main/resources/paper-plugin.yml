@@ -1,0 +1,8 @@
+name: MikuAuth
+version: '${project.version}'
+main: cn.miku.auth.paper.MikuAuthPlugin
+api-version: '26.2'
+authors: [JunXieX]
+description: 服务端登录验证插件（进服前对话框）：原生 Dialog / SQLite / 与代理端共用账号表
+folia-supported: true
+loader: cn.miku.auth.paper.MikuAuthLoader
