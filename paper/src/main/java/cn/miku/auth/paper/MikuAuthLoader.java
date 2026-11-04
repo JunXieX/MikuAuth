@@ -5,6 +5,7 @@ import io.papermc.paper.plugin.loader.PluginLoader;
 import io.papermc.paper.plugin.loader.library.impl.MavenLibraryResolver;
 import org.eclipse.aether.artifact.DefaultArtifact;
 import org.eclipse.aether.graph.Dependency;
+import org.eclipse.aether.repository.RemoteRepository;
 
 /**
  * 运行期依赖装载器：插件 jar 不 shade 任何第三方库。
@@ -20,8 +21,16 @@ public final class MikuAuthLoader implements PluginLoader {
     @Override
     public void classloader(PluginClasspathBuilder classpathBuilder) {
         MavenLibraryResolver resolver = new MavenLibraryResolver();
-        // 不手动加仓库：MavenLibraryResolver 自带 Maven Central，
-        // 而 Paper 对"插件自行声明 central 仓库"会直接抛 RuntimeException（实测踩到）
+        // 仓库有两个约束，必须同时满足（两条都是实测踩出来的）：
+        //   ① Paper 不允许插件自行声明 Maven Central（id=central / repo1.maven.org），
+        //      声明了会抛 "Plugin used Maven Central for library resolution"；
+        //   ② 完全不声明仓库时，MavenLibraryResolver 没有任何默认源，
+        //      解析直接失败：所有构件报 (absent)，插件连加载都过不去（Leaf 26.2 上复现）。
+        // 因此这里用两个镜像：阿里云优先（国内快），回落到 PaperMC 的 public 仓库（它代理 Central）。
+        resolver.addRepository(new RemoteRepository.Builder(
+                "aliyun", "default", "https://maven.aliyun.com/repository/public/").build());
+        resolver.addRepository(new RemoteRepository.Builder(
+                "papermc", "default", "https://repo.papermc.io/repository/maven-public/").build());
         // 密码哈希（与代理端同一算法，账号库可共用）
         resolver.addDependency(new Dependency(new DefaultArtifact("at.favre.lib:bcrypt:0.10.2"), "runtime"));
         resolver.addDependency(new Dependency(new DefaultArtifact("at.favre.lib:bytes:1.5.0"), "runtime"));

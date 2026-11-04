@@ -1,43 +1,37 @@
-MikuAuth 3.8.3 更新日志
+MikuAuth 3.8.4 更新日志
 
-本版新增 **Paper 服务端版本**（进服前对话框认证），并让两个构件的版本号对齐到同一条版本线。
+本版只修 Paper 版的一个启动失败问题：**插件在部分服务端上根本加载不起来**。
 代理端（Velocity）除版本号外无行为变化。
 
-## 本次更新
+## 本次修复
 
-### 1. 新增 MikuAuth-Paper（服务端版本）
+### Paper 版启动报 `Error resolving libraries`、插件无法启用
 
-文件 `MikuAuth-Paper-3.8.3.jar`，放进 Paper 的 `plugins/` 即可。它只有一个登录模式：**进服前认证**。
+现象：
 
-- 玩家停在服务端的「配置阶段」——画面是"加载地形"、尚未进入世界——时弹出原版对话框，
-  认证通过后连接才继续；未认证的连接不会进入世界，不存在"进服后被冻结/看到地形"的窗口。
-- 用 Paper 的 `AsyncPlayerConnectionConfigureEvent`（进服前、异步）+ 原生 Dialog API 实现，
-  客户端不需要装任何东西（要求 **1.21.6+**）。
-- 提交走自定义点击（`PlayerCustomClickEvent` + 对话框输入回传），密码不经过命令系统。
-- 账号库与代理端**表结构一致**（`miku_players` / `miku_audit_log`），SQLite 与 MariaDB/MySQL 双后端，
-  可让两端指向同一个库。
-- 密码：BCrypt 存储（成本可调），能读 AuthMe 的 `$SHA$` / `$SHA512$` / MD5 旧哈希，
-  首次成功登录后自动升级为 BCrypt。
-- 跨连接防暴破：同一 IP 与同一账号分别累计失败次数，达阈值临时封禁，重连绕不过去。
-- 管理命令：`/mikuauth reload｜unlock｜accounts｜audit`（`mikuauth.admin` / `mikuauth.admin.write`）。
+```
+[ERROR]: [DirectoryProviderSource] Error loading plugin: Error resolving libraries
+io.papermc.paper.plugin.loader.library.LibraryLoadingException: Error resolving libraries
+Caused by: ... The following artifacts could not be resolved:
+  at.favre.lib:bcrypt:jar:0.10.2 (absent), org.xerial:sqlite-jdbc:jar:3.46.1.3 (absent), ...
+```
 
-影响：需要"登录前不进服"的 Paper 服不必再挂 limbo 或额外登录插件；
-两端的账号库可以直接共用，从代理端迁到 Paper 不需要导数据。
+原因：3.8.3 在修另一条报错（Paper 不允许插件自行声明 Maven Central）时，把仓库声明整个删掉了；
+而 `MavenLibraryResolver` **没有任何默认仓库**，于是所有构件都解析不到，
+插件在加载阶段就失败 —— 不是运行时出错，是整个插件没起来。
 
-> ⚠ 两个版本**不要同时接管登录**：同一台服上装两个登录插件会各弹各的框。
+现在改为声明两个**镜像**（都不是 Maven Central 本身）：
 
-### 2. 两个构件版本号对齐
+1. 阿里云 `https://maven.aliyun.com/repository/public/`（国内优先）；
+2. PaperMC `https://repo.papermc.io/repository/maven-public/`（代理 Central，兜底）。
 
-- `MikuAuth-3.8.3.jar`（Velocity）与 `MikuAuth-Paper-3.8.3.jar`（Paper）同版本发布；
-- Paper 构件不再单走 1.0.x 版本线。
+影响：插件恢复正常加载；国内服务器首次启动下载依赖也不会卡在 Central 上。
 
-影响：服主核对 jar 时不会因为"一个 3.8.x、一个 1.0.x"而误判两者不配套。
+> 离线服仍然可以预置：把这些 jar 放进 `~/.m2/repository` 的标准坐标目录，解析会直接命中缓存。
+> 首次启动必须能访问上面两个镜像之一。
 
 ## 升级说明
 
-- 代理端：直接替换 `plugins/` 下的 jar 并重启即可，配置与文本无需改动。
-- Paper：把 `MikuAuth-Paper-3.8.3.jar` 放进 `plugins/`，首次启动生成 `config.yml` 与 `messages.yml`；
-  首次启动会用 Maven 解析器下载 BCrypt 与 JDBC 驱动（离线服请预置到 `~/.m2/repository`）。
-- Paper 顶的 `login.timeout-seconds` 必须小于服务端自身的配置阶段超时，否则玩家看到的是服务端的超时断开。
-- Paper 客户端低于 1.21.6 时不会显示对话框，只能超时断开；断开提示里已写明这条原因。
-- 完整改动：https://github.com/JunXieX/MikuAuth/compare/v3.8.2...v3.8.3
+- 代理端：直接替换 jar 即可，配置与文本无需改动。
+- Paper：替换 `MikuAuth-Paper-3.8.4.jar` 后重启；如果 3.8.3 已经下载过依赖，本版会直接命中缓存。
+- 完整改动：https://github.com/JunXieX/MikuAuth/compare/v3.8.3...v3.8.4
