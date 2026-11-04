@@ -19,7 +19,7 @@ MikuAuth 3.8.5 更新日志
 而 3.8.4 传的 `BinaryTagHolder.binaryTagHolder(String)` 是 **string** tag，被 Paper 在编码阶段直接拒绝，
 于是每一条连接都走异常分支被断开 —— 等于 Paper 版装上去谁进不来。
 
-修复：改用 `CompoundBinaryTag.empty()`（登录/注册由服务端会话判定，payload 无需携带任何数据）。
+修复：改传 SNBT 空 compound —— `BinaryTagHolder.binaryTagHolder("{}")`（登录/注册由服务端会话判定，payload 无需携带任何数据）。
 
 影响：对话框可以正常下发，认证流程恢复。
 
