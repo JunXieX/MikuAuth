@@ -22,6 +22,11 @@ public final class MikuConfig {
     /** 内置默认配置资源路径。 */
     private static final String DEFAULT_RESOURCE = "/config.yml";
 
+    /** 登录模式：认证服的 play 阶段弹框（默认，最稳）。 */
+    public static final String LOGIN_MODE_POST = "post";
+    /** 登录模式：认证服的 configuration 阶段弹框（"进服前"登录）。 */
+    public static final String LOGIN_MODE_PRE = "pre";
+
     private final YamlStore store = new YamlStore();
 
     /** 最近一次加载使用的日志器（配置值类型异常时用于告警；未加载时为 null）。 */
@@ -330,6 +335,53 @@ public final class MikuConfig {
         return Math.max(0, getInt("login.timeout-seconds", 60));
     }
 
+    /** 登录模式：{@code post}（认证服 play 阶段弹框，默认）/ {@code pre}（配置阶段弹框）。 */
+    public String loginMode() {
+        String raw = getString("login.mode", LOGIN_MODE_POST).trim().toLowerCase(Locale.ROOT);
+        if (LOGIN_MODE_POST.equals(raw) || LOGIN_MODE_PRE.equals(raw)) {
+            return raw;
+        }
+        // 拼错时静默回落会让服主以为配了 pre、实际跑的却是 post：必须告警一次
+        if (logger != null && clampWarned.add("login.mode")) {
+            logger.warn("[配置] login.mode '{}' 不是合法值（可选：post / pre），已按 {} 处理",
+                    raw, LOGIN_MODE_POST);
+        }
+        return LOGIN_MODE_POST;
+    }
+
+    /** 是否启用配置阶段认证（{@code login.mode: pre}）。 */
+    public boolean preAuthEnabled() {
+        return LOGIN_MODE_PRE.equals(loginMode());
+    }
+
+    /**
+     * 配置阶段等待认证的上限（秒）。
+     *
+     * <p>0 = 沿用 {@code login.timeout-seconds}；两者都为 0（都不限时）时强制取 60：
+     * 配置阶段的闸门一旦无人放行，玩家就会永远停在"加载地形"，因此这里不允许"不限时"。
+     */
+    public int preAuthTimeoutSeconds() {
+        int configured = clampValue("login.pre.timeout-seconds",
+                getInt("login.pre.timeout-seconds", 30), 0, 3600);
+        if (configured > 0) {
+            return configured;
+        }
+        int global = authTimeoutSeconds();
+        if (global > 0) {
+            return global;
+        }
+        if (logger != null && clampWarned.add("login.pre.timeout-seconds")) {
+            logger.warn("[配置] login.pre.timeout-seconds 与 login.timeout-seconds 都为 0（不限时），"
+                    + "配置阶段认证将强制使用 60 秒上限，避免玩家永远停在加载地形");
+        }
+        return 60;
+    }
+
+    /** 配置阶段对话框是否提供"取消"按钮（点击即断开）。 */
+    public boolean preAuthShowCancelButton() {
+        return getBoolean("login.pre.show-cancel-button", true);
+    }
+
     /**
      * BCrypt 成本因子。
      *
@@ -365,6 +417,24 @@ public final class MikuConfig {
     /** 延迟多久再弹对话框（毫秒）：避开子服 Join Game 包竞争。 */
     public int dialogShowDelayMillis() {
         return clampValue("dialog.show-delay-millis", getInt("dialog.show-delay-millis", 700), 0, 10000);
+    }
+
+    /**
+     * 对话框提交通道。
+     *
+     * <p>{@code custom}（默认）：客户端回发 {@code custom_click_action}，密码不经过命令系统；
+     * {@code command}：按钮执行 {@code /login $(password)}，仅作兼容兜底。
+     * {@code pre} 模式恒为 custom —— configuration 阶段没有命令通道，command 通道在那里不可用。
+     */
+    public String submitChannel() {
+        String raw = getString("dialog.submit-channel", "custom").trim().toLowerCase(Locale.ROOT);
+        if ("custom".equals(raw) || "command".equals(raw)) {
+            return raw;
+        }
+        if (logger != null && clampWarned.add("dialog.submit-channel")) {
+            logger.warn("[配置] dialog.submit-channel '{}' 不是合法值（可选：custom / command），已按 custom 处理", raw);
+        }
+        return "custom";
     }
 
     // ---------------------------------------------------------------------

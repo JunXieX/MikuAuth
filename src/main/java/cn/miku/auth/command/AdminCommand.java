@@ -145,6 +145,7 @@ public final class AdminCommand implements SimpleCommand {
                 Map.of("player", target)));
         plugin.authManager().diagnoseAsync(target)
                 .thenAccept(report -> {
+                    sendLine(invocation, report.modeLine());
                     sendLine(invocation, report.dbLine());
                     sendLine(invocation, report.apiLine());
                     sendLine(invocation, report.decisionLine());

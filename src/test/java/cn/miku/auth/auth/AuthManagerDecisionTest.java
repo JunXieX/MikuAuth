@@ -824,15 +824,22 @@ class AuthManagerDecisionTest {
         proxy = schedulableServer();
         conflictLog = new PremiumConflictLog(dataDirectory, config,
                 org.slf4j.helpers.NOPLogger.NOP_LOGGER);
-        return new AuthManager(new Object(), proxy,
+        DialogService dialogService =
+                new DialogService(config, messages, org.slf4j.helpers.NOPLogger.NOP_LOGGER);
+        PreAuthGate preAuthGate =
+                new PreAuthGate(proxy, config, org.slf4j.helpers.NOPLogger.NOP_LOGGER, dialogService);
+        AuthManager manager = new AuthManager(new Object(), proxy,
                 org.slf4j.helpers.NOPLogger.NOP_LOGGER,
                 config, messages, repository,
                 new PremiumService(config, org.slf4j.helpers.NOPLogger.NOP_LOGGER),
-                new DialogService(config, messages, org.slf4j.helpers.NOPLogger.NOP_LOGGER),
+                dialogService,
                 new DisplayManager(config, messages),
                 new AuditLogger(repository, config, org.slf4j.helpers.NOPLogger.NOP_LOGGER),
                 conflictLog,
-                new BackendKickLog(dataDirectory, config, org.slf4j.helpers.NOPLogger.NOP_LOGGER));
+                new BackendKickLog(dataDirectory, config, org.slf4j.helpers.NOPLogger.NOP_LOGGER),
+                preAuthGate);
+        preAuthGate.bind(manager);
+        return manager;
     }
 
     /** 读取冲突记录的数据行（跳过以 # 开头的文件头）；文件不存在时视为空。 */

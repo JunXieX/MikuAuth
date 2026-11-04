@@ -49,9 +49,11 @@ class ConfigAndMessagesTest {
             "dialog.login.title", "dialog.login.body", "dialog.login.input-label",
             "dialog.login.button", "dialog.login.button-tooltip",
             "dialog.login.close-button", "dialog.login.close-button-tooltip",
+            "dialog.login.cancel-button", "dialog.login.cancel-button-tooltip",
             "dialog.register.title", "dialog.register.body", "dialog.register.input-label",
             "dialog.register.confirm-label", "dialog.register.button", "dialog.register.button-tooltip",
             "dialog.register.close-button", "dialog.register.close-button-tooltip",
+            "dialog.register.cancel-button", "dialog.register.cancel-button-tooltip",
             // AuthManager 的失败反馈（errorKey 以变量传入）
             "error.already-authed", "error.please-register", "error.please-login",
             "error.password-empty", "error.password-length", "error.password-too-long",
@@ -66,11 +68,13 @@ class ConfigAndMessagesTest {
             "changepassword.no-password", "changepassword.wrong-locked",
             // 踢出原因
             "kick.premium-verify-failed", "kick.auth-error", "kick.name-snipe",
-            "kick.auth-timeout", "kick.too-many-tries",
+            "kick.auth-timeout", "kick.too-many-tries", "kick.login-cancelled",
             // 管理命令
             "admin.usage", "admin.error",
             "admin.accounts.header", "admin.accounts.entry", "admin.accounts.not-found", "admin.accounts.no-ip",
-            "admin.diagnose.header", "admin.diagnose.db-none", "admin.diagnose.db-premium",
+            "admin.diagnose.header", "admin.diagnose.mode-post", "admin.diagnose.mode-pre",
+            "admin.diagnose.mode-pre-held",
+            "admin.diagnose.db-none", "admin.diagnose.db-premium",
             "admin.diagnose.db-offline", "admin.diagnose.db-offline-no-password",
             "admin.diagnose.api-disabled", "admin.diagnose.api-premium", "admin.diagnose.api-offline",
             "admin.diagnose.api-unknown", "admin.diagnose.decision-online",

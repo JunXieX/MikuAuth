@@ -4,7 +4,8 @@ import cn.miku.auth.api.MikuAuthApi;
 import cn.miku.auth.api.MikuAuthProvider;
 import cn.miku.auth.auth.AuthListener;
 import cn.miku.auth.auth.AuthManager;
-import cn.miku.auth.auth.DialogCloseListener;
+import cn.miku.auth.auth.PreAuthGate;
+import cn.miku.auth.auth.DialogPacketListener;
 import cn.miku.auth.command.AdminCommand;
 import cn.miku.auth.command.ChangePasswordCommand;
 import cn.miku.auth.command.CloseDialogCommand;
@@ -77,7 +78,7 @@ public final class MikuAuthPlugin implements MikuAuthApi {
      * 插件版本：唯一的版本号来源（{@code pom.xml} 需同步修改）。
      * 同时用于 {@code @Plugin} 注解与对外请求的 User-Agent，避免多处硬编码走样。
      */
-    public static final String VERSION = "3.8.0";
+    public static final String VERSION = "3.8.2";
 
     private final ProxyServer server;
     private final Logger logger;
@@ -99,6 +100,8 @@ public final class MikuAuthPlugin implements MikuAuthApi {
     private AccountMigrator migrator;
     /** 审计记录器：认证流程、迁移器与管理命令的写操作共用同一个实例。 */
     private AuditLogger auditLogger;
+    /** 配置阶段认证闸门（login.mode: pre）；post 模式下它不会扣留任何连接。 */
+    private PreAuthGate preAuthGate;
     private boolean packetListenerRegistered;
 
     @Inject
@@ -193,12 +196,18 @@ public final class MikuAuthPlugin implements MikuAuthApi {
         conflictLog = new PremiumConflictLog(dataDirectory, config, logger);
         // 后端拒绝进入记录文件（目标服给出的踢出原因；同一原因也会转发到玩家聊天栏）
         backendKickLog = new BackendKickLog(dataDirectory, config, logger);
+        // 配置阶段认证闸门：先建闸门、再建状态机，最后把状态机注入闸门（避免构造期循环依赖）
+        preAuthGate = new PreAuthGate(server, config, logger, dialogService);
         authManager = new AuthManager(this, server, logger, config, messages,
-                database, premiumService, dialogService, display, auditLogger, conflictLog, backendKickLog);
+                database, premiumService, dialogService, display, auditLogger, conflictLog, backendKickLog,
+                preAuthGate);
+        preAuthGate.bind(authManager);
         migrator = new AccountMigrator(database, auditLogger, logger);
 
         // 事件监听
         server.getEventManager().register(this, new AuthListener(server, logger, config, authManager));
+        // 配置阶段闸门：订阅 PlayerConfigurationEvent（等待型事件，返回 future 即扣住配置阶段）
+        server.getEventManager().register(this, preAuthGate);
 
         // 命令注册
         registerCommands();
@@ -244,6 +253,10 @@ public final class MikuAuthPlugin implements MikuAuthApi {
                 config.dialogEnabled()
                         ? "启用（客户端 1.21.6+ 且 PacketEvents 就绪时使用，否则自动降级为聊天栏）"
                         : "已关闭（全部玩家使用聊天栏 /login、/register）");
+        logger.info("[MikuAuth] 登录模式: {}",
+                config.preAuthEnabled()
+                        ? "pre（认证服配置阶段弹对话框，认证成功后才进入世界；不支持时自动按 post 处理）"
+                        : "post（认证服 Join Game 之后弹对话框）");
         if (conflictLog.enabled()) {
             logger.info("[MikuAuth] 昵称冲突记录: {}"
                             + "（同名连接被顶下线时写入，便于事后核对）",
@@ -297,7 +310,7 @@ public final class MikuAuthPlugin implements MikuAuthApi {
      */
     private void registerPacketListener() {
         try {
-            packetListenerRegistered = DialogCloseListener.tryRegister(server, authManager);
+            packetListenerRegistered = DialogPacketListener.tryRegister(server, authManager);
             if (packetListenerRegistered) {
                 logger.debug("[MikuAuth] PacketEvents 监听器已注册");
                 return;
@@ -307,7 +320,7 @@ public final class MikuAuthPlugin implements MikuAuthApi {
                     return;
                 }
                 try {
-                    packetListenerRegistered = DialogCloseListener.tryRegister(server, authManager);
+                    packetListenerRegistered = DialogPacketListener.tryRegister(server, authManager);
                     if (packetListenerRegistered) {
                         logger.debug("[MikuAuth] PacketEvents 监听器已注册（延迟）");
                     } else {
@@ -348,6 +361,10 @@ public final class MikuAuthPlugin implements MikuAuthApi {
         MikuAuthProvider.register(null);
         // 注意：初始化失败时不能跳过清理 —— initialize() 可能在建好部分组件
         // （数据库连接池、写盘队列）之后才报错，它们的线程与连接必须在这里关闭
+        if (preAuthGate != null) {
+            // 先放行所有还扣在配置阶段的连接：future 悬挂会让关停卡在半路
+            preAuthGate.shutdown();
+        }
         if (authManager != null) {
             authManager.shutdown();
         }

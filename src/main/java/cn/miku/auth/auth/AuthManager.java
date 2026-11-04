@@ -123,12 +123,26 @@ public final class AuthManager {
         volatile boolean conflictChecked;
         /** 检测结果：该昵称当前是否对应一个正版账号（离线账号占用正版昵称）。 */
         volatile boolean premiumConflict;
+        /** 本会话处于哪个阶段：play（post 模式）/ configuration（pre 模式）。 */
+        volatile Phase phase = Phase.PLAY;
 
         AuthSession(String username, String ip) {
             this.username = username;
             this.ip = ip;
             this.connectedAt = System.currentTimeMillis();
         }
+    }
+
+    /**
+     * 认证进行在哪个阶段。
+     *
+     * <p>play：玩家已经进入认证服的世界（post 模式，行为与 3.8.0 完全一致）；
+     * configuration：玩家还停在"加载地形"（pre 模式，由 {@code PreAuthGate} 扣留）。
+     * 两个阶段的差别只有"能发什么反馈"与"什么时候安排转服"，认证规则完全共用。
+     */
+    private enum Phase {
+        PLAY,
+        CONFIG
     }
 
     // ---------------------------------------------------------------------
@@ -154,6 +168,11 @@ public final class AuthManager {
     private final AuditLogger audit;
     /** 昵称冲突记录文件（只记"同名冲突被顶下线"；会话校验失败不产生事件，见 logJoinFailure 说明）。 */
     private final PremiumConflictLog conflictLog;
+    /** 配置阶段认证闸门（pre 模式；post 模式下它不会扣留任何连接）。 */
+    private final PreAuthGate preAuthGate;
+    /** 配置阶段认证成功后待补发的提示键（玩家进入 play 阶段时消费）。 */
+    private final java.util.concurrent.ConcurrentHashMap<UUID, String> deferredSuccessKeys =
+            new java.util.concurrent.ConcurrentHashMap<>();
 
     /** 在线玩家会话状态。 */
     private final ConcurrentHashMap<UUID, AuthSession> sessions = new ConcurrentHashMap<>();
@@ -218,7 +237,8 @@ public final class AuthManager {
     public AuthManager(Object plugin, ProxyServer server, Logger logger, MikuConfig config, MikuMessages messages,
                        AuthRepository database, PremiumService premiumService,
                        DialogService dialogService, DisplayManager display,
-                       AuditLogger audit, PremiumConflictLog conflictLog, BackendKickLog kickLog) {
+                       AuditLogger audit, PremiumConflictLog conflictLog, BackendKickLog kickLog,
+                       PreAuthGate preAuthGate) {
         this.plugin = plugin;
         this.server = server;
         this.logger = logger;
@@ -228,6 +248,7 @@ public final class AuthManager {
         this.premium = new PremiumDecider(premiumService, config, messages, logger);
         this.audit = audit;
         this.conflictLog = conflictLog;
+        this.preAuthGate = preAuthGate;
         this.dialogService = dialogService;
         this.display = display;
         this.throttle = new LoginThrottle(config, logger);
@@ -465,8 +486,9 @@ public final class AuthManager {
     // 进服诊断：判定链路回放（/mikuauth diagnose）
     // ---------------------------------------------------------------------
 
-    /** 诊断报告：数据库状态 / 正版查询 / 决策 / 冲突说明（各段已本地化，null = 无该段）。 */
-    public record DiagnoseReport(String dbLine, String apiLine, String decisionLine, String conflictLine) {
+    /** 诊断报告：登录模式 / 数据库状态 / 正版查询 / 决策 / 冲突说明（各段已本地化，null = 无该段）。 */
+    public record DiagnoseReport(String modeLine, String dbLine, String apiLine,
+                                 String decisionLine, String conflictLine) {
     }
 
     /**
@@ -483,6 +505,7 @@ public final class AuthManager {
     }
 
     private DiagnoseReport buildReport(String nickname, StoredPlayer stored, PremiumResolution api) {
+        String modeLine = describeModeLine(nickname);
         String dbLine;
         if (stored == null) {
             dbLine = messages.raw("admin.diagnose.db-none");
@@ -528,7 +551,24 @@ public final class AuthManager {
                     ? messages.raw("admin.diagnose.decision-deny")
                     : messages.raw("admin.diagnose.decision-offline");
         }
-        return new DiagnoseReport(dbLine, apiLine, decisionLine, conflictLine);
+        return new DiagnoseReport(modeLine, dbLine, apiLine, decisionLine, conflictLine);
+    }
+
+    /**
+     * 诊断用的"当前登录模式"一行。
+     *
+     * <p>三种文案分开写而不是拼中文：全部可见文本都在 messages.yml 里，服主可自行改写。
+     */
+    private String describeModeLine(String nickname) {
+        if (!config.preAuthEnabled()) {
+            return messages.raw("admin.diagnose.mode-post");
+        }
+        Player online = server.getPlayer(nickname).orElse(null);
+        if (online != null && preAuthGate.isHeld(online.getUniqueId())) {
+            return messages.raw("admin.diagnose.mode-pre-held")
+                    .replace("{seconds}", String.valueOf(preAuthGate.heldSeconds(online.getUniqueId())));
+        }
+        return messages.raw("admin.diagnose.mode-pre");
     }
 
     /** 未注册昵称的正版判定。 */
@@ -741,6 +781,15 @@ public final class AuthManager {
             // 调度失败（后端仍离线）由心跳每 5 秒重试，后端一恢复就自动送回；
             // 目标服明确拒绝则该玩家会被断开并看到原因（见 TransferCoordinator）。
             String currentServer = resolveCurrentServer(player, connectedServer);
+            if (preAuthGate.consumeJustReleased(player.getUniqueId())) {
+                // 配置阶段刚放行：玩家此刻才进入认证服的 play 阶段
+                // （pre 路径不经过常规认证收尾，因此成功提示与转服都要在这里补上）
+                showDeferredSuccess(player);
+                if (isAuthServerName(currentServer)) {
+                    transfer.schedule(player);
+                }
+                return;
+            }
             if (isAuthServerName(currentServer)) {
                 if (config.autoReturnOnFallback()) {
                     logger.info("[调度] {} 已认证但被送回认证服 '{}'（后端关闭/重启等），已重新调度转服",
@@ -814,6 +863,93 @@ public final class AuthManager {
         }
         // 5) 已注册登录 / 新玩家注册（会话免密已在第 1 步处理）
         startAuthFlow(player, session);
+    }
+
+    // ---------------------------------------------------------------------
+    // 配置阶段认证（login.mode: pre）
+    // ---------------------------------------------------------------------
+
+    /** 该连接是否仍需要密码认证（正版/基岩玩家不进入配置阶段闸门）。 */
+    public boolean needsConfigPhaseAuth(Player player) {
+        if (isAuthenticated(player.getUniqueId())) {
+            return false;
+        }
+        return !isBedrockPlayer(player.getUniqueId());
+    }
+
+    /**
+     * 在配置阶段启动认证流程：建会话 → 查库定 login/register → 下发对话框。
+     *
+     * <p>与 play 阶段共用同一个 {@link AuthSession} 与同一套校验（{@code PasswordPolicy} /
+     * {@code PasswordHasher} / {@link LoginThrottle} / 审计），只把"反馈通道"换成对话框。
+     */
+    public void beginConfigAuth(Player player) {
+        String ip = remoteIpOf(player);
+        AuthSession session = new AuthSession(player.getUsername(), ip);
+        session.phase = Phase.CONFIG;
+        sessions.put(player.getUniqueId(), session);
+        withFallback(database.findPlayer(player.getUsername()).thenAccept(existing -> {
+            StoredPlayer stored = existing.orElse(null);
+            session.textKey = (stored == null || !stored.hasPassword()) ? "register" : "login";
+            showConfigDialog(player, session, null);
+        }), null, "配置阶段流程启动");
+    }
+
+    /**
+     * 在配置阶段下发对话框；失败即降级为 post 流程。
+     *
+     * <p>降级动作：放行闸门 → 玩家进入认证服的 play 阶段 → {@code handleConnected}
+     * 看到"无会话"重新查库 → 走现有的 play 阶段对话框。功能不缺失，只是晚一步。
+     */
+    private void showConfigDialog(Player player, AuthSession session, String extraLine) {
+        if (session.allowed) {
+            return;
+        }
+        String error;
+        try {
+            error = dialogService.showInConfiguration(player, "register".equals(session.textKey), extraLine);
+        } catch (Throwable t) {
+            // PacketEvents 未安装时可能在这里抛类链接错误（Error 而非 Exception）
+            error = "对话框不可用: " + t.getClass().getSimpleName();
+        }
+        if (error == null) {
+            return;
+        }
+        logger.debug("[认证] {} 无法使用配置阶段对话框（{}），降级为 play 阶段流程",
+                player.getUsername(), error);
+        sessions.remove(player.getUniqueId(), session);
+        preAuthGate.release(player);
+    }
+
+    /**
+     * 对话框提交（{@code custom_click_action}）：按会话的 textKey 分派到现有的注册/登录流程。
+     *
+     * <p>不复制一份校验逻辑：直接复用 {@link #handleRegisterCommand} / {@link #handleLoginCommand}，
+     * 保证"对话框提交"与"命令提交"在策略、节流、审计、哈希升级上完全一致。
+     */
+    public void handleDialogSubmit(Player player, String password, String confirm, boolean configPhase) {
+        AuthSession session = sessions.get(player.getUniqueId());
+        if (session == null) {
+            if (configPhase && preAuthGate.isHeld(player.getUniqueId())) {
+                // 会话丢失（例如刚降级）：重建一次，避免玩家点了按钮却毫无反应
+                beginConfigAuth(player);
+            }
+            return;
+        }
+        if ("register".equals(session.textKey)) {
+            handleRegisterCommand(player, password, confirm);
+        } else {
+            handleLoginCommand(player, password);
+        }
+    }
+
+    /** 对话框取消：配置阶段直接断开（那里没有聊天栏可退回）；play 阶段等同"返回聊天栏"。 */
+    public void handleDialogCancel(Player player, boolean configPhase) {
+        if (configPhase) {
+            kick(player, "kick.login-cancelled");
+            return;
+        }
+        handleClientActivity(player);
     }
 
     /** 进入登录/注册流程：查库决定弹登录框还是注册框。 */
@@ -1029,6 +1165,12 @@ public final class AuthManager {
         AuthSession session = sessions.get(player.getUniqueId());
         if (session != null) {
             return session;
+        }
+        if (preAuthGate.isHeld(player.getUniqueId())) {
+            // 配置阶段被扣住的连接还没有 play 会话（getCurrentServer 为空），
+            // 不能走下面"是否在认证服"的判断：直接重建配置阶段会话
+            beginConfigAuth(player);
+            return sessions.get(player.getUniqueId());
         }
         if (!transfer.isOnAuthServer(player)) {
             return null;
@@ -1591,6 +1733,10 @@ public final class AuthManager {
      */
     private void completeAuth(Player player, AuthSession session, String messageKey, boolean passwordVerified,
                               boolean touchAccount) {
+        if (session.phase == Phase.CONFIG) {
+            completeConfigAuth(player, session, messageKey, passwordVerified, touchAccount);
+            return;
+        }
         session.allowed = true;
         session.dialogOpen = false;
         // 原子地"消费"本次认证的会话：密码校验与注册写入都在异步链上，玩家可能在完成前
@@ -1629,6 +1775,54 @@ public final class AuthManager {
         transfer.schedule(player);
     }
 
+    /**
+     * 配置阶段认证成功的收尾（{@code pre} 模式）。
+     *
+     * <p>与 play 阶段只差三处：
+     * <ul>
+     *   <li>不发 Title/聊天 —— 客户端还在 configuration 阶段，这些界面根本不存在；</li>
+     *   <li>不调 {@code transfer.schedule} —— 此刻玩家还没进入 play，连接请求必然失败，
+     *       改为放行后在 {@code ServerConnectedEvent} 里补调度；</li>
+     *   <li>改为完成闸门 future —— Velocity 收到完成信号才写 {@code finish_configuration}
+     *       并把连接切到 PLAY。</li>
+     * </ul>
+     */
+    private void completeConfigAuth(Player player, AuthSession session, String messageKey,
+                                    boolean passwordVerified, boolean touchAccount) {
+        session.allowed = true;
+        session.dialogOpen = false;
+        if (!sessions.remove(player.getUniqueId(), session)) {
+            logger.debug("[认证] {} 的配置阶段认证会话已失效，跳过收尾", player.getUsername());
+            return;
+        }
+        authenticatedConnections.put(player.getUniqueId(), player);
+        audit.record(auditActionFor(messageKey), player.getUsername(), player.getUniqueId(),
+                session.ip, auditDetailFor(messageKey) + "（配置阶段）");
+        if (passwordVerified) {
+            throttle.reset(session.ip, player.getUsername());
+        }
+        long expiresAt = passwordVerified && config.sessionEnabled()
+                ? System.currentTimeMillis() + config.sessionDurationMinutes() * 60_000L
+                : 0L;
+        if (touchAccount) {
+            withFallback(database.finishLogin(player.getUsername(), session.ip, expiresAt), null, "登录收尾");
+        }
+        // 成功提示留到玩家真正进入 play 之后再发（见 showDeferredSuccess）
+        deferredSuccessKeys.put(player.getUniqueId(), messageKey);
+        preAuthGate.release(player);
+    }
+
+    /** 补发配置阶段认证的成功提示（此时玩家已进入 play 阶段）。 */
+    private void showDeferredSuccess(Player player) {
+        String key = deferredSuccessKeys.remove(player.getUniqueId());
+        if (key == null) {
+            key = "auth.success.login";
+        }
+        display.showSuccess(player, key + ".title", key + ".subtitle",
+                Map.of("player", player.getUsername()));
+        display.chatAlways(player, key + ".chat", Map.of());
+    }
+
     /** 登录失败反馈：聊天提示 + 支持时重开 Dialog（错误文本追加进对话框正文）。 */
     /**
      * 失败反馈：聊天提示 +（登录流程且客户端支持时）重开对话框。
@@ -1644,6 +1838,15 @@ public final class AuthManager {
      */
     private void failLogin(Player player, AuthSession session, String errorKey,
                            Map<String, String> placeholders, boolean retryDialog) {
+        if (session.phase == Phase.CONFIG) {
+            // 配置阶段没有聊天栏：只能把错误追加进对话框正文后重发
+            String extra = hasNicknameConflict(session)
+                    ? renderText(errorKey, placeholders) + "\n"
+                    + renderText("error.password-wrong-conflict", Map.of())
+                    : renderText(errorKey, placeholders);
+            showConfigDialog(player, session, extra);
+            return;
+        }
         boolean reopen = retryDialog && config.dialogEnabled()
                 && player.isActive() && "login".equals(session.textKey);
         if (!reopen) {
@@ -1681,6 +1884,10 @@ public final class AuthManager {
     /** 注册失败反馈：聊天提示 + 支持时重开注册 Dialog。 */
     private void failRegister(Player player, AuthSession session, String errorKey,
                               Map<String, String> placeholders) {
+        if (session.phase == Phase.CONFIG) {
+            showConfigDialog(player, session, renderText(errorKey, placeholders));
+            return;
+        }
         display.chat(player, errorKey, placeholders);
         if (config.dialogEnabled() && player.isActive() && "register".equals(session.textKey)) {
             String error;
@@ -1870,6 +2077,7 @@ public final class AuthManager {
                 display.tick(player);
             }
         }
+        preAuthGate.tick();
         transfer.retryStuck();
         // 清理过期的失败计数（低频操作，心跳里做即可）
         if (throttlePurgeTick++ % 60 == 0) {
@@ -1907,6 +2115,9 @@ public final class AuthManager {
 
     private void cleanup(UUID playerId) {
         sessions.remove(playerId);
+        deferredSuccessKeys.remove(playerId);
+        // 配置阶段被扣住的连接必须放行：future 悬挂会让 Velocity 永远停在 configuration
+        preAuthGate.forget(playerId);
         transfer.forget(playerId);
         // 显示跟踪必须按 UUID 清理：DisconnectEvent 触发时玩家已经不在代理的注册表里了
         // （velocity-proxy 反编译核对：unregisterConnection 先 removeFromMaps，

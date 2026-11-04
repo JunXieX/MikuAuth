@@ -26,7 +26,7 @@ MikuMC 系列插件交流群：1105054380
 ## 安全
 
 - 正版昵称强制走正版会话校验，盗版客户端无法冒充正版玩家；
-- 密码用 BCrypt 存储（成本因子可调）；密码在命令历史与日志中都无需留痕（对话框通过命令提交，请在代理日志中保持命令内容不记录）；
+- 密码用 BCrypt 存储（成本因子可调）；对话框提交默认走客户端直回传，**密码不经过命令系统**（不进命令历史与代理日志）；
 - 限次与风控双层：单次连接限次；跨连接按"同 IP"与"同账号"两个维度累计失败，达到阈值临时封禁，重连无法绕过；
 - 登录审计日志（谁、何时、从哪、以什么方式进入）与被顶下线记录，便于事后追溯。
 
@@ -57,6 +57,7 @@ MikuMC 系列插件交流群：1105054380
 | 离线服（含基岩版） | `session.enabled: true`（同 IP 免密）；安装 floodgate 后 `bedrock.auto-login: true` |
 | 多个代理共用一个账号库 | `database.type` 改为 `mariadb`（或 `mysql`），多个代理填同一套连接参数 |
 | 不需要对话框 | `dialog.enabled: false`，玩家统一用聊天栏命令 |
+| 想要"进服前登录"（AuthMe 风格） | `login.mode: "pre"` —— 对话框在认证服的配置阶段弹出，认证成功才进入世界；客户端不支持时自动按 post 处理 |
 
 ## 命令与权限
 
@@ -138,7 +139,7 @@ MikuAuthProvider.get().ifPresent(api -> {
 | `session` | 同 IP 会话免密的开关、时长与续期 |
 | `audit` | 审计日志开关、保留天数、查询条数、两个记录文件 |
 | `migrate` | 账号迁移的位置白名单 |
-| `registration` / `login` | 密码长度、每 IP 账号上限、尝试次数、认证超时、BCrypt 成本 |
+| `registration` / `login` | 密码长度、每 IP 账号上限、尝试次数、认证超时、BCrypt 成本、登录模式（post / pre） |
 | `dialog` / `display` | 对话框开关与延迟；Title / BossBar 开关与样式 |
 | `database` | SQLite / MariaDB / MySQL 连接参数 |
 | `security` | 跨会话失败计数与临时封禁 |

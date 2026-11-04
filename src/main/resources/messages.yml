@@ -100,6 +100,9 @@ dialog:
     button-tooltip: "<gray>点击提交密码</gray>"
     close-button: "<yellow>返回聊天栏</yellow>"
     close-button-tooltip: "<gray>关闭对话框，改用 /login 命令登录</gray>"
+    # 仅 pre 模式使用：配置阶段没有聊天栏可退回，点击即断开本次连接
+    cancel-button: "<red>退出登录</red>"
+    cancel-button-tooltip: "<gray>放弃本次登录，断开连接</gray>"
 
   register:
     title: "<gradient:#00e0ff:#a855f7>账号注册</gradient>"
@@ -111,6 +114,9 @@ dialog:
     button-tooltip: "<gray>点击提交注册信息</gray>"
     close-button: "<yellow>返回聊天栏</yellow>"
     close-button-tooltip: "<gray>关闭对话框，改用 /register 命令注册</gray>"
+    # 仅 pre 模式使用：配置阶段没有聊天栏可退回，点击即断开本次连接
+    cancel-button: "<red>退出登录</red>"
+    cancel-button-tooltip: "<gray>放弃本次注册，断开连接</gray>"
 
 # ----------------------------------------------------------------------------
 # 错误提示（聊天栏）
@@ -200,6 +206,9 @@ kick:
   # 密码错误次数过多
   too-many-tries: "<red>密码错误次数过多，请稍后再试。\n<gray>多次失败可能触发安全防护，请确认密码后重试。"
 
+  # 玩家在登录框里点了「退出登录」（pre 模式；配置阶段没有聊天栏可退回）
+  login-cancelled: "<red>已取消登录，请重新连接后再试。"
+
 # ----------------------------------------------------------------------------
 # 管理命令反馈（/mikuauth ...，需要 mikuauth.admin 权限）
 # ----------------------------------------------------------------------------
@@ -246,6 +255,11 @@ admin:
   diagnose:
     # {player} = 昵称
     header: "<gradient:#00e0ff:#a855f7>进服诊断</gradient> <dark_gray>»</dark_gray> <yellow>{player}</yellow>"
+    # 当前登录模式（post / pre）；pre 模式下若是被扣住的玩家会额外标出已等待秒数
+    mode-post: "<gray>登录模式：<yellow>post</yellow>（认证服 Join Game 之后弹对话框）</gray>"
+    mode-pre: "<gray>登录模式：<yellow>pre</yellow>（认证服配置阶段弹对话框，进入世界之前）</gray>"
+    # {seconds} = 已被扣在配置阶段的秒数
+    mode-pre-held: "<gray>登录模式：<yellow>pre</yellow>（该玩家当前被扣在配置阶段，已等待 {seconds} 秒）</gray>"
     db-none: "<gray>数据库记录：无（未注册）</gray>"
     # {uuid} = 正版 UUID
     db-premium: "<gray>数据库记录：正版登记（UUID: {uuid}）</gray>"
