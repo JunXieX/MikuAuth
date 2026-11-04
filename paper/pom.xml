@@ -2,8 +2,8 @@
 <!--
   MikuAuth-Paper —— MikuAuth 的 Paper 服务端版本（与代理端共用一个仓库，但独立构件）。
 
-  为什么独立版本号：Paper 版是重新实现的服务端插件（配置、数据表结构、数据库账号库可与代理版共用），
-  功能面与代理版不同步，因此单独从 1.0.0 起走自己的版本线。
+  版本号与代理端保持同一条版本线：同一次发版里两个构件版本一致，
+  便于服主确认"这对 jar 是一起发布的"（两者表结构也是共用的）。
 -->
 <project xmlns="http://maven.apache.org/POM/4.0.0"
          xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
@@ -12,7 +12,7 @@
 
     <groupId>cn.miku</groupId>
     <artifactId>mikuauth-paper</artifactId>
-    <version>1.0.0</version>
+    <version>3.8.3</version>
     <packaging>jar</packaging>
     <name>MikuAuth-Paper</name>
 

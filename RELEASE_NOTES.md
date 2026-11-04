@@ -1,46 +1,43 @@
-MikuAuth 3.8.2 更新日志
+MikuAuth 3.8.3 更新日志
 
-本版新增「进服前登录」模式，并让对话框提交不再经过命令系统。**默认行为与 3.8.0 完全一致**。
+本版新增 **Paper 服务端版本**（进服前对话框认证），并让两个构件的版本号对齐到同一条版本线。
+代理端（Velocity）除版本号外无行为变化。
 
 ## 本次更新
 
-### 1. 新增两种登录模式（`login.mode`）
+### 1. 新增 MikuAuth-Paper（服务端版本）
 
-- **post（默认）**：与 3.8.0 一致 —— 需要密码的玩家先进认证服，Join Game 之后弹对话框。
-- **pre（新增）**：对话框改为在认证服的「配置阶段」弹出。此时玩家还在"加载地形"、尚未进入世界，
-  认证成功后代理才放行进入世界；体验上等同 AuthMe 的 pre-join 登录。
+文件 `MikuAuth-Paper-3.8.3.jar`，放进 Paper 的 `plugins/` 即可。它只有一个登录模式：**进服前认证**。
 
-实现用的是 Velocity 自带的等待型事件（`PlayerConfigurationEvent`）：代理会等事件返回的
-task 完成后才写 `finish_configuration` 并切换状态，因此**不向客户端补发任何协议包**，
-也就没有"包状态错位导致客户端断线"的风险。
+- 玩家停在服务端的「配置阶段」——画面是"加载地形"、尚未进入世界——时弹出原版对话框，
+  认证通过后连接才继续；未认证的连接不会进入世界，不存在"进服后被冻结/看到地形"的窗口。
+- 用 Paper 的 `AsyncPlayerConnectionConfigureEvent`（进服前、异步）+ 原生 Dialog API 实现，
+  客户端不需要装任何东西（要求 **1.21.6+**）。
+- 提交走自定义点击（`PlayerCustomClickEvent` + 对话框输入回传），密码不经过命令系统。
+- 账号库与代理端**表结构一致**（`miku_players` / `miku_audit_log`），SQLite 与 MariaDB/MySQL 双后端，
+  可让两端指向同一个库。
+- 密码：BCrypt 存储（成本可调），能读 AuthMe 的 `$SHA$` / `$SHA512$` / MD5 旧哈希，
+  首次成功登录后自动升级为 BCrypt。
+- 跨连接防暴破：同一 IP 与同一账号分别累计失败次数，达阈值临时封禁，重连绕不过去。
+- 管理命令：`/mikuauth reload｜unlock｜accounts｜audit`（`mikuauth.admin` / `mikuauth.admin.write`）。
 
-不支持配置阶段对话框的客户端（低于 1.21.11，或协议版本无法识别）自动按 post 处理 ——
-功能不缺失，只是晚一步看到对话框。
+影响：需要"登录前不进服"的 Paper 服不必再挂 limbo 或额外登录插件；
+两端的账号库可以直接共用，从代理端迁到 Paper 不需要导数据。
 
-> 两种模式下未认证连接都只落在认证服（limbo），目标服不会因为假连接压测多承担流量。
-> 开启 pre 时请确认 `login.pre.timeout-seconds`（默认 30 秒）小于认证服自身的配置阶段超时，
-> 否则玩家看到的是认证服的超时断开，而不是本插件的提示。
+> ⚠ 两个版本**不要同时接管登录**：同一台服上装两个登录插件会各弹各的框。
 
-### 2. 对话框提交流程不再经过命令系统
+### 2. 两个构件版本号对齐
 
-此前对话框按钮执行 `/login <密码>`，密码会进入代理的 `.console_history`、玩家客户端历史
-与命令日志，因此文档里一直有一条"请不要开启命令内容记录"的免责提示。
-现在默认改为客户端直回传（`custom_click_action`）：密码不经过命令系统，那条提示已随之删除。
+- `MikuAuth-3.8.3.jar`（Velocity）与 `MikuAuth-Paper-3.8.3.jar`（Paper）同版本发布；
+- Paper 构件不再单走 1.0.x 版本线。
 
-- 新增配置 `dialog.submit-channel`：`custom`（默认）/ `command`（兼容兜底）；
-- `pre` 模式恒为 custom —— 配置阶段没有命令通道，用 command 会导致密码无法提交。
-
-### 3. `/mikuauth diagnose` 增加「登录模式」一行
-
-排查"玩家卡在加载地形"时，输出的第一行就是当前模式，以及该玩家是否正被扣在配置阶段、
-已经等待了多少秒。
+影响：服主核对 jar 时不会因为"一个 3.8.x、一个 1.0.x"而误判两者不配套。
 
 ## 升级说明
 
-- 直接替换 `plugins/` 下的 jar 并重启代理即可；`config.yml` 会自动补进 `login.mode`、
-  `login.pre.*`、`dialog.submit-channel`（只增不改，写入前留 `.bak` 备份）。
-- `messages.yml` 会补进 `dialog.*.cancel-button*`、`kick.login-cancelled`、
-  `admin.diagnose.mode-*`。
-- 依赖：`packetevents-velocity` 需为含配置阶段对话框的版本（2.11.0 起已具备）。
-  未安装或版本过旧时 pre 模式自动退化为 post，不会导致玩家进不去。
-- 完整改动：https://github.com/JunXieX/MikuAuth/compare/v3.8.0...v3.8.2
+- 代理端：直接替换 `plugins/` 下的 jar 并重启即可，配置与文本无需改动。
+- Paper：把 `MikuAuth-Paper-3.8.3.jar` 放进 `plugins/`，首次启动生成 `config.yml` 与 `messages.yml`；
+  首次启动会用 Maven 解析器下载 BCrypt 与 JDBC 驱动（离线服请预置到 `~/.m2/repository`）。
+- Paper 顶的 `login.timeout-seconds` 必须小于服务端自身的配置阶段超时，否则玩家看到的是服务端的超时断开。
+- Paper 客户端低于 1.21.6 时不会显示对话框，只能超时断开；断开提示里已写明这条原因。
+- 完整改动：https://github.com/JunXieX/MikuAuth/compare/v3.8.2...v3.8.3
