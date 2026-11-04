@@ -79,10 +79,6 @@ public final class PaperConfig {
         return clamped("audit.retain-days", 30, 0, 3650);
     }
 
-    public boolean titleEnabled() {
-        return raw().getBoolean("display.title", true);
-    }
-
     public String databaseType() {
         return raw().getString("database.type", "sqlite").trim().toLowerCase(java.util.Locale.ROOT);
     }

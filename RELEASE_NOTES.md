@@ -1,30 +1,71 @@
-MikuAuth 3.8.5 更新日志
+MikuAuth 3.8.6 更新日志
 
-本版修 Paper 版的一个**进服前对话框必崩**问题：玩家连入时对话框发不出去，直接被断开。
-代理端（Velocity）除版本号外无行为变化。
+本版是 Paper 版「进服前对话框」的一次深度自检修复：对照 Paper 26.3 的
+`paper-api`/服务端实现逐条核对 API 语义，并参照 AuthMe 已发布的同功能实现
+（`PreJoinDialogService` + `PaperDialogFlowListener`）补齐差异。共修 8 处，其中 4 处会直接
+导致「框点了没反应」或「能注册但登不上」。代理端（Velocity）除版本号外无行为变化。
 
-## 本次修复
+## 修复
 
-### Paper：对话框提交动作的 payload 类型错误
+### Paper：对话框点击后立刻被关掉，玩家看不到任何反馈
 
-现象（真机日志）：
+按钮动作完成后客户端按 `after_action` 决定下一步，**默认值是 `CLOSE`**，也就是点一下就把框关了。
+玩家在校验期间只看到空屏，误以为没点上而反复点击；错误重发时还会闪一下。
+改为 `WAIT_FOR_RESPONSE`（切到"等待响应"屏，由服务端关框或换框），并在会话结束时显式
+`closeDialog()` —— 少了这一步，客户端会一直停在"等待响应"屏上。
 
-```
-[WARN]: [MikuAuth] [认证] 玩家 的配置阶段认证异常:
-        java.lang.IllegalArgumentException: Additions must be a compound tag
-[INFO]: 玩家 lost connection: 认证服务暂时不可用，请稍后重试。
-```
+影响：点提交后不再闪屏、不再重复提交，成功进服时屏幕能正常收起。
 
-原因：对话框按钮的 `DialogAction.customClick(Key, BinaryTagHolder)` 要求 payload 是 NBT **compound**，
-而 3.8.4 传的 `BinaryTagHolder.binaryTagHolder(String)` 是 **string** tag，被 Paper 在编码阶段直接拒绝，
-于是每一条连接都走异常分支被断开 —— 等于 Paper 版装上去谁进不来。
+### Paper：输入框只允许 32 个字符，长密码永远输不进去
 
-修复：改传 SNBT 空 compound —— `BinaryTagHolder.binaryTagHolder("{}")`（登录/注册由服务端会话判定，payload 无需携带任何数据）。
+`DialogInput.text(...)` 的 `maxLength` **默认 32**，而配置项 `registration.max-password-length`
+可以放到 128。于是经代理端用 40 位密码注册的账号，在这边输入框里根本打不满，
+提交上去永远是截断值 → 每次都是"密码错误"，且没有任何提示说明原因。
+现在输入框上限跟随配置。
 
-影响：对话框可以正常下发，认证流程恢复。
+影响：放宽密码长度后老账号仍可登录；不再出现"密码明明对却登不上"。
+
+### Paper：密码校验与数据库读写跑在主线程
+
+`PlayerCustomClickEvent` 由服务端在主线程（`packetProcessor`）派发，而原实现在回调里
+直接做 BCrypt 校验和 JDBC 读写。BCrypt cost 10 单次约 60~100ms，20 人同时登录就是数秒的
+全服卡顿，且 SQLite 是文件 IO。改为回调只解析参数、校验与落库全部投递异步调度器。
+
+影响：多人同时首次进服不再卡服。
+
+### Paper：账号库只有一条连接，却没有串行化
+
+`Store` 的注释写着"全部调用都投递到异步线程串行执行"，实际上没有任何锁 ——
+配置阶段的虚拟线程、主线程回调、定时清理三方并发使用同一条 JDBC 连接。
+一旦并发 `prepareStatement` 抛异常，`find()` 会静默返回 null，老玩家被判成"未注册"，
+弹注册框，再被唯一约束顶回"已注册"，形成无解循环。
+现在所有公开方法同一把锁串行，并把数据库异常写进日志而不是丢掉。
+
+影响：并发登录稳定；数据库故障能被看见，而不是伪装成"账号不存在"。
+
+### Paper：登录成功提示在配置阶段发不出去，被静默丢弃
+
+Adventure 的 `Audience#sendMessage` 默认是空方法，配置阶段的 Audience 没有覆写它 ——
+在配置阶段发聊天等于丢进黑洞。改为把提示存起来，`PlayerJoinEvent` 时补发。
+
+影响：进服后能看到"登录成功"提示。
+
+### 其他
+
+- **同名二次连接会顶掉正在等待的会话**：会话表原本以玩家 UUID 为键，客户端重连或双开时
+  新会话覆盖旧会话，旧连接的虚拟线程只能干等到超时。改为以连接实例为键。
+- **对话框阶段掉线后要等满超时**：客户端在对话框阶段断开时没有事件唤醒等待中的线程。
+  新增 `PlayerConnectionCloseEvent` 处理，断开即释放。
+- **ViaVersion 下老客户端必然超时**：低于 1.21.6（协议 771）的客户端收不到对话框包，
+  原实现让它在空屏上等满 60 秒再断。现在检测到协议不足直接断开并说明原因。
+- 提交动作的 payload 改传 `null`（Paper 文档标注"不需要附加数据时传 null"），
+  不再依赖任何 SNBT 解析；玩家填写的输入值由客户端并入回传的 compound。
+- 删除 Paper 版死配置 `display.title`（无任何调用点）；`/mikuauth accounts` 的文案
+  与统计口径对齐（统计的是最近登录 IP 下的账号数）。
 
 ## 升级说明
 
-- Paper：替换 `MikuAuth-Paper-3.8.5.jar` 后重启即可，配置与数据无需改动。
-- 代理端：直接替换 jar，行为与 3.8.4 一致。
-- 完整改动：https://github.com/JunXieX/MikuAuth/compare/v3.8.4...v3.8.5
+- Paper：替换 `MikuAuth-Paper-3.8.6.jar` 后重启即可，配置与数据无需改动。
+  上一版新增的 `display` 段已无作用，可删可留。
+- 代理端：直接替换 jar，行为与 3.8.5 一致。
+- 完整改动：https://github.com/JunXieX/MikuAuth/compare/v3.8.5...v3.8.6

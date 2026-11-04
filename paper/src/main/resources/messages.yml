@@ -76,7 +76,8 @@ admin:
   unlock-success: "<green>已解除 {subject} 的登录失败封禁。"
   unlock-none: "<gray>{subject} 当前没有封禁记录（参数填玩家名或 IP）。"
   # {player} = 查询昵称，{count} = 该 IP 名下账号数
-  accounts-header: "<gray>玩家</gray> <yellow>{player}</yellow> <gray>名下共 {count} 个账号。</gray>"
+  # 统计口径是"该账号最近登录 IP 下的账号数"，不是该玩家名下的账号数
+  accounts-header: "<gray>玩家</gray> <yellow>{player}</yellow> <gray>最近登录 IP 名下共有 {count} 个账号。</gray>"
   accounts-none: "<red>未找到玩家 {player} 的账号记录。"
   audit-header: "<gray>玩家</gray> <yellow>{player}</yellow> <gray>最近 {count} 条审计：</gray>"
   audit-none: "<gray>没有查到 <yellow>{player}</yellow> 的审计记录。</gray>"

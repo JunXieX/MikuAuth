@@ -29,9 +29,9 @@ public final class MikuAuthPlugin extends JavaPlugin {
         this.messages = new Messages(this);
 
         try {
-            this.store = new Store(getDataFolder(), config);
+            this.store = new Store(getDataFolder(), config, getLogger());
         } catch (SQLException e) {
-            getLogger().severe("[MikuAuth] 无法打开数据库: " + e.getMessage());
+            getLogger().severe("无法打开数据库: " + e.getMessage());
             getServer().getPluginManager().disablePlugin(this);
             return;
         }
@@ -51,9 +51,9 @@ public final class MikuAuthPlugin extends JavaPlugin {
             gate.tick();
         }, 5L, 60L, java.util.concurrent.TimeUnit.MINUTES);
 
-        getLogger().info("[MikuAuth] v" + getPluginMeta().getVersion()
+        getLogger().info("v" + getPluginMeta().getVersion()
                 + " 已加载 —— 进服前认证已启用（配置阶段对话框；客户端需 1.21.6+）");
-        getLogger().info("[MikuAuth] 数据库: " + config.databaseType()
+        getLogger().info("数据库: " + config.databaseType()
                 + " / " + config.databaseFile() + "（与代理端共用同一套账号表）");
     }
 

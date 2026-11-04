@@ -29,8 +29,10 @@ Paper 服务端的登录验证插件：玩家停在服务端的**配置阶段**�
 2. 启动服务端 —— 首次启动会生成 plugins/MikuAuth/config.yml 与 messages.yml；
 3. 按需修改配置后重启（数据库连接参数改动必须重启）。
 
-> 首次启动时插件用 Maven 解析器下载 BCrypt 与 JDBC 驱动（需联网）。
-> 离线服请把这些 jar 预置到 ~/.m2/repository 的标准坐标目录。
+> 首次启动时插件用 Maven 解析器下载 BCrypt 与 JDBC 驱动（需联网，仓库用阿里云 + PaperMC 镜像）。
+> 离线服请把这些 jar 预置到服务端的库缓存目录 `<服务端>/libraries/<group>/<artifact>/<version>/`
+> （同名 .jar 与 .pom 各一份；这个目录才是加载器的真实缓存位置），
+> 或者放到 `~/.m2/repository` 的标准坐标目录。
 
 ## 配置说明
 
@@ -40,7 +42,7 @@ Paper 服务端的登录验证插件：玩家停在服务端的**配置阶段**�
 | registration | 密码长度、每 IP 账号上限 |
 | login | 单次连接尝试次数、配置阶段等待上限、BCrypt 成本 |
 | security | 跨连接失败计数与临时封禁 |
-| dialog | 是否允许 Esc 关闭对话框 |
+| dialog | 是否允许 Esc 关闭对话框（关掉后玩家只能提交或等超时） |
 | audit | 审计开关与保留天数 |
 
 login.timeout-seconds 必须小于服务端自身的配置阶段超时，否则玩家看到的是服务端的超时断开。
@@ -51,7 +53,7 @@ login.timeout-seconds 必须小于服务端自身的配置阶段超时，否则�
 | --- | --- | --- |
 | /mikuauth reload | 重载配置与语言文件 | mikuauth.admin.write |
 | /mikuauth unlock <玩家或IP> | 解除登录失败的临时封禁 | mikuauth.admin.write |
-| /mikuauth accounts <玩家> | 查该玩家所在 IP 名下的账号数 | mikuauth.admin |
+| /mikuauth accounts <玩家> | 查该玩家最近登录 IP 名下的账号数 | mikuauth.admin |
 | /mikuauth audit <玩家> | 查最近 15 条审计 | mikuauth.admin |
 
 ## 权限节点
@@ -71,8 +73,9 @@ login.timeout-seconds 必须小于服务端自身的配置阶段超时，否则�
 
 ## 已知限制
 
-- 客户端低于 1.21.6 时没有对话框，只能超时断开；断开提示里已写明这条原因；
-- 配置阶段拿不到协议版本号，无法在进服前按版本精确拒绝（只能事后提示）；
+- 客户端低于 1.21.6 时收不到对话框包。原生服务端上不可能出现这种客户端（版本对不上直接连不进来），
+  只有在装了 ViaVersion 之类的协议转换插件时才会，此时插件会按协议号提前断开并说明原因；
+- 配置阶段窗口里既没有聊天栏也没有命令，所有提示只能走对话框正文或断开画面；
 - 本版本不提供 setpassword：配置阶段没有命令通道，改密请直接改库或临时关插件处理。
 
 ## 开发
