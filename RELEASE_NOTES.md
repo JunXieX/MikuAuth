@@ -1,37 +1,30 @@
-MikuAuth 3.8.4 更新日志
+MikuAuth 3.8.5 更新日志
 
-本版只修 Paper 版的一个启动失败问题：**插件在部分服务端上根本加载不起来**。
+本版修 Paper 版的一个**进服前对话框必崩**问题：玩家连入时对话框发不出去，直接被断开。
 代理端（Velocity）除版本号外无行为变化。
 
 ## 本次修复
 
-### Paper 版启动报 `Error resolving libraries`、插件无法启用
+### Paper：对话框提交动作的 payload 类型错误
 
-现象：
+现象（真机日志）：
 
 ```
-[ERROR]: [DirectoryProviderSource] Error loading plugin: Error resolving libraries
-io.papermc.paper.plugin.loader.library.LibraryLoadingException: Error resolving libraries
-Caused by: ... The following artifacts could not be resolved:
-  at.favre.lib:bcrypt:jar:0.10.2 (absent), org.xerial:sqlite-jdbc:jar:3.46.1.3 (absent), ...
+[WARN]: [MikuAuth] [认证] 玩家 的配置阶段认证异常:
+        java.lang.IllegalArgumentException: Additions must be a compound tag
+[INFO]: 玩家 lost connection: 认证服务暂时不可用，请稍后重试。
 ```
 
-原因：3.8.3 在修另一条报错（Paper 不允许插件自行声明 Maven Central）时，把仓库声明整个删掉了；
-而 `MavenLibraryResolver` **没有任何默认仓库**，于是所有构件都解析不到，
-插件在加载阶段就失败 —— 不是运行时出错，是整个插件没起来。
+原因：对话框按钮的 `DialogAction.customClick(Key, BinaryTagHolder)` 要求 payload 是 NBT **compound**，
+而 3.8.4 传的 `BinaryTagHolder.binaryTagHolder(String)` 是 **string** tag，被 Paper 在编码阶段直接拒绝，
+于是每一条连接都走异常分支被断开 —— 等于 Paper 版装上去谁进不来。
 
-现在改为声明两个**镜像**（都不是 Maven Central 本身）：
+修复：改用 `CompoundBinaryTag.empty()`（登录/注册由服务端会话判定，payload 无需携带任何数据）。
 
-1. 阿里云 `https://maven.aliyun.com/repository/public/`（国内优先）；
-2. PaperMC `https://repo.papermc.io/repository/maven-public/`（代理 Central，兜底）。
-
-影响：插件恢复正常加载；国内服务器首次启动下载依赖也不会卡在 Central 上。
-
-> 离线服仍然可以预置：把这些 jar 放进 `~/.m2/repository` 的标准坐标目录，解析会直接命中缓存。
-> 首次启动必须能访问上面两个镜像之一。
+影响：对话框可以正常下发，认证流程恢复。
 
 ## 升级说明
 
-- 代理端：直接替换 jar 即可，配置与文本无需改动。
-- Paper：替换 `MikuAuth-Paper-3.8.4.jar` 后重启；如果 3.8.3 已经下载过依赖，本版会直接命中缓存。
-- 完整改动：https://github.com/JunXieX/MikuAuth/compare/v3.8.3...v3.8.4
+- Paper：替换 `MikuAuth-Paper-3.8.5.jar` 后重启即可，配置与数据无需改动。
+- 代理端：直接替换 jar，行为与 3.8.4 一致。
+- 完整改动：https://github.com/JunXieX/MikuAuth/compare/v3.8.4...v3.8.5

@@ -293,7 +293,11 @@ public final class PreJoinGate implements Listener {
         ActionButton button = ActionButton.builder(plugin.messages().component(base + ".button", placeholders))
                 .tooltip(plugin.messages().component(base + ".button-tooltip", placeholders))
                 .width(160)
-                .action(DialogAction.customClick(SUBMIT, BinaryTagHolder.binaryTagHolder(session.textKey)))
+                // payload 必须是 NBT **compound**。这个形参的类型是 BinaryTagHolder，
+                // 它接收的是"待解析的 SNBT 文本"：传 "login" 会被解析成 string tag，
+                // Paper 编码时直接抛 IllegalArgumentException: Additions must be a compound tag（真机复现）。
+                // 传 "{}" 才是空 compound；登录/注册本就由服务端会话的 textKey 决定，无需附加数据。
+                .action(DialogAction.customClick(SUBMIT, BinaryTagHolder.binaryTagHolder("{}")))
                 .build();
 
         Dialog dialog = Dialog.create(factory -> factory.empty()
