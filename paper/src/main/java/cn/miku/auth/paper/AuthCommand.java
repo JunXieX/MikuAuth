@@ -26,6 +26,12 @@ final class AuthCommand {
         return Commands.literal("mikuauth")
                 .requires(source -> source.getSender().hasPermission("mikuauth.admin")
                         || source.getSender().hasPermission("mikuauth.admin.write"))
+                // 只敲 /mikuauth 时给出用法，而不是 Brigadier 的 "Unknown or incomplete command"
+                .executes(context -> {
+                    context.getSource().getSender().sendMessage(plugin.messages().prefixed("admin.usage",
+                            Map.of("usage", "/mikuauth reload | unlock <玩家或IP> | accounts <玩家> | audit <玩家>")));
+                    return Command.SINGLE_SUCCESS;
+                })
                 .then(Commands.literal("reload")
                         .requires(source -> source.getSender().hasPermission("mikuauth.admin.write"))
                         .executes(context -> {

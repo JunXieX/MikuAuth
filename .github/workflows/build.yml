@@ -14,11 +14,20 @@ on:
 
 jobs:
   build:
+    # Paper 构件先构建并上传，build 再取回来一起挂到 Release 上：
+    # 这样"同一次发版的两个 jar"版本号天然一致，也不用在两个作业里各构建一次
+    needs: paper
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
       - uses: actions/checkout@v4
+
+      - name: Download paper artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: MikuAuth-Paper
+          path: paper-dist
 
       - name: Set up JDK 25
         uses: actions/setup-java@v4
@@ -49,7 +58,10 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
-          files: target/MikuAuth-*.jar
+          # 两个构件一起发：代理端 + Paper 端，版本号一致
+          files: |
+            target/MikuAuth-*.jar
+            paper-dist/MikuAuth-Paper-*.jar
           prerelease: ${{ contains(github.ref_name, 'Beta') }}
           # 更新日志以仓库内的 RELEASE_NOTES.md 为准（发布前更新该文件）。
           # 此前用 generate_release_notes 由 GitHub 自动生成，而下面的 Modrinth

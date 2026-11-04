@@ -5,7 +5,6 @@ import io.papermc.paper.plugin.loader.PluginLoader;
 import io.papermc.paper.plugin.loader.library.impl.MavenLibraryResolver;
 import org.eclipse.aether.artifact.DefaultArtifact;
 import org.eclipse.aether.graph.Dependency;
-import org.eclipse.aether.repository.RemoteRepository;
 
 /**
  * 运行期依赖装载器：插件 jar 不 shade 任何第三方库。
@@ -21,8 +20,8 @@ public final class MikuAuthLoader implements PluginLoader {
     @Override
     public void classloader(PluginClasspathBuilder classpathBuilder) {
         MavenLibraryResolver resolver = new MavenLibraryResolver();
-        resolver.addRepository(new RemoteRepository.Builder(
-                "central", "default", "https://repo1.maven.org/maven2/").build());
+        // 不手动加仓库：MavenLibraryResolver 自带 Maven Central，
+        // 而 Paper 对"插件自行声明 central 仓库"会直接抛 RuntimeException（实测踩到）
         // 密码哈希（与代理端同一算法，账号库可共用）
         resolver.addDependency(new Dependency(new DefaultArtifact("at.favre.lib:bcrypt:0.10.2"), "runtime"));
         resolver.addDependency(new Dependency(new DefaultArtifact("at.favre.lib:bytes:1.5.0"), "runtime"));
