@@ -1,5 +1,6 @@
 package cn.miku.auth.premium;
 
+import cn.miku.auth.config.MikuConfig;
 import org.junit.jupiter.api.Test;
 
 import java.util.ArrayList;
@@ -98,6 +99,20 @@ class PremiumServiceTest {
         try {
             // 子任务抛 Error 时若不做兜底，汇总会永远等不到结果
             assertTrue(await(service, "user1").isUnknown());
+        } finally {
+            service.shutdown();
+        }
+    }
+
+    @Test
+    void executorQueueFitsTheLargestReloadableInFlightLimit() {
+        // 队列在构造期定型，而 premium.max-in-flight-queries 允许被 reload 调大到上限：
+        // 若队列仍按构造时的值算，调大后再 reload 会让正常查询撞上 AbortPolicy，
+        // 结果被判成"无法判定"（fail-closed 下等于拒绝登录）
+        PremiumService service = new PremiumService(null, List.of(offline(ResolverConfig.MOJANG, 0)), 5000);
+        try {
+            assertTrue(service.queueCapacity() >= MikuConfig.MAX_PREMIUM_IN_FLIGHT_QUERIES * 3,
+                    "队列容量 " + service.queueCapacity() + " 容不下最大在途上限所需的任务数");
         } finally {
             service.shutdown();
         }

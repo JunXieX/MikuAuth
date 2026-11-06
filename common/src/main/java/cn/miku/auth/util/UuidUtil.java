@@ -1,7 +1,6 @@
 package cn.miku.auth.util;
 
 import java.nio.charset.StandardCharsets;
-import java.security.MessageDigest;
 import java.util.UUID;
 
 /**
@@ -73,25 +72,4 @@ public final class UuidUtil {
         }
     }
 
-    /** 常量时间比较两个 UUID（迁移/查重时避免时序差异）。 */
-    public static boolean sameUuid(UUID a, UUID b) {
-        return MessageDigest.isEqual(
-                uuidBytes(a), uuidBytes(b));
-    }
-
-    private static byte[] uuidBytes(UUID uuid) {
-        if (uuid == null) {
-            return new byte[16];
-        }
-        return new byte[]{
-                (byte) (uuid.getMostSignificantBits() >> 56), (byte) (uuid.getMostSignificantBits() >> 48),
-                (byte) (uuid.getMostSignificantBits() >> 40), (byte) (uuid.getMostSignificantBits() >> 32),
-                (byte) (uuid.getMostSignificantBits() >> 24), (byte) (uuid.getMostSignificantBits() >> 16),
-                (byte) (uuid.getMostSignificantBits() >> 8), (byte) uuid.getMostSignificantBits(),
-                (byte) (uuid.getLeastSignificantBits() >> 56), (byte) (uuid.getLeastSignificantBits() >> 48),
-                (byte) (uuid.getLeastSignificantBits() >> 40), (byte) (uuid.getLeastSignificantBits() >> 32),
-                (byte) (uuid.getLeastSignificantBits() >> 24), (byte) (uuid.getLeastSignificantBits() >> 16),
-                (byte) (uuid.getLeastSignificantBits() >> 8), (byte) uuid.getLeastSignificantBits()
-        };
-    }
 }

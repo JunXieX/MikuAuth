@@ -150,8 +150,16 @@ public final class MikuConfig {
      */
     public int premiumMaxInFlightQueries() {
         return clampValue("premium.max-in-flight-queries",
-                getInt("premium.max-in-flight-queries", 32), 1, 1024);
+                getInt("premium.max-in-flight-queries", 32), 1, MAX_PREMIUM_IN_FLIGHT_QUERIES);
     }
+
+    /**
+     * {@code premium.max-in-flight-queries} 允许的最大值。
+     *
+     * <p>公开成常量是因为 {@code PremiumService} 要按它一次性开足线程池队列：
+     * 队列在构造期定型，而该配置可被 reload 改动，两处若各写一个数字就会漂移。
+     */
+    public static final int MAX_PREMIUM_IN_FLIGHT_QUERIES = 1024;
 
     /** 单个来源 IP 的在途查询数上限；不会超过全局上限（超出时按全局上限生效）。 */
     public int premiumMaxInFlightPerIp() {
@@ -545,10 +553,13 @@ public final class MikuConfig {
      * disable 意味着跨公网明文连接，属于和安全有关的静默降级。
      */
     private void validateAndWarn(LogSink logger) {
-        String sslMode = getString("database.mariadb.ssl-mode", "disable").trim().toLowerCase(Locale.ROOT);
+        // 必须用实际生效的键路径：database.type=mysql 时读的是 database.mysql.ssl-mode，
+        // 只盯 mariadb 段会让 mysql 段的拼写错误静默回退成 disable（跨公网明文连接）
+        String sslModeKey = networkDbPath("ssl-mode");
+        String sslMode = getString(sslModeKey, "disable").trim().toLowerCase(Locale.ROOT);
         if (!Set.of("disable", "trust", "verify-ca", "verify-full").contains(sslMode)) {
-            logger.warn("[配置] database.mariadb.ssl-mode '{}' 不是合法值，已按 disable 处理"
-                    + "（可选：disable / trust / verify-ca / verify-full）", sslMode);
+            logger.warn("[配置] {} '{}' 不是合法值，已按 disable 处理"
+                    + "（可选：disable / trust / verify-ca / verify-full）", sslModeKey, sslMode);
         }
         warnIfUnknownEnum(logger, "display.bossbar-color", bossBarColor(),
                 Set.of("pink", "blue", "red", "green", "yellow", "purple", "white"));
