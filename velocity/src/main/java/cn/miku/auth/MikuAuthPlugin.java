@@ -60,7 +60,7 @@ import java.util.UUID;
 @Plugin(
         id = "mikuauth",
         name = "MikuAuth",
-        version = MikuAuthPlugin.VERSION,
+        version = cn.miku.auth.MikuVersion.VERSION,
         description = "Velocity 登录验证插件：正版多源免密 / 基岩版免密 / Dialog 对话框登录（可开关）/ 同 IP 会话免密 / SQLite + MariaDB + MySQL",
         authors = {"JunXieX"},
         dependencies = {
@@ -73,13 +73,6 @@ import java.util.UUID;
         }
 )
 public final class MikuAuthPlugin implements MikuAuthApi {
-
-    /**
-     * 插件版本：与 {@code gradle.properties} 的 {@code version} 保持一致
-     * （{@code checkVersionConstant} 任务会在构建时校验，改漏了直接失败）。
-     * 同时用于 {@code @Plugin} 注解与对外请求的 User-Agent，避免多处硬编码走样。
-     */
-    public static final String VERSION = cn.miku.auth.MikuVersion.VERSION;
 
     private final ProxyServer server;
     private final Logger logger;
@@ -248,7 +241,7 @@ public final class MikuAuthPlugin implements MikuAuthApi {
         MikuAuthProvider.register(this);
 
         logger.info("[MikuAuth] v{} 已加载 — 正版验证: {} | 基岩版(Floodgate): {} | 认证服: {}",
-                VERSION,
+                cn.miku.auth.MikuVersion.VERSION,
                 premiumService.hasResolvers() ? "启用" : "禁用",
                 config.bedrockAutoLogin() ? "启用" : "禁用",
                 config.authServer());

@@ -71,7 +71,7 @@ val checkVersionConstant = tasks.register("checkVersionConstant") {
         val text = source.asFile.readText()
         if (!text.contains("VERSION = \"" + expected + "\"")) {
             throw GradleException(
-                "MikuAuthPlugin.VERSION 与 gradle.properties 的 version ($expected) 不一致：" +
+                "MikuVersion.VERSION 与 gradle.properties 的 version ($expected) 不一致：" +
                     "改版本号时两处必须同时改"
             )
         }

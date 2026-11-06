@@ -1279,13 +1279,9 @@ public final class AuthManager {
                 kick(player, "kick.too-many-tries", session);
                 return;
             }
-            int remaining = max > 0 ? max - session.loginTries : -1;
-            Map<String, String> placeholders = lock != null
-                    ? Map.of("remaining", String.valueOf(Math.max(0, remaining)),
-                             "minutes", String.valueOf(lock.remainingMinutes()))
-                    : remaining >= 0 ? Map.of("remaining", String.valueOf(remaining)) : Map.of();
+            // 只有封禁提示带占位符（error.password-wrong 本身无占位符）
             failLogin(player, session, lock != null ? "error.password-wrong-locked" : "error.password-wrong",
-                    placeholders, true);
+                    lock != null ? Map.of("minutes", String.valueOf(lock.remainingMinutes())) : Map.of(), true);
         } finally {
             releaseCryptoSlot(session.username);
         }

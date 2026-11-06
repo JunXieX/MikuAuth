@@ -11,7 +11,7 @@ package cn.miku.auth;
  */
 public final class MikuVersion {
 
-    public static final String VERSION = "3.9.0";
+    public static final String VERSION = "3.9.1";
 
     private MikuVersion() {
     }

@@ -1,60 +1,38 @@
-MikuAuth 3.9.0 更新日志
+MikuAuth 3.9.1 更新日志
 
-本版不动认证流程，改的是**代码怎么组织**：代理端（Velocity）与纸端（Paper）此前各写一套业务逻辑，
-现在收敛成一个公共模块，两端只保留平台适配层；构建从 Maven 换成 Gradle。
-代理端与纸端共用同一个版本号、同一份配置文件、同一份语言文件。
+本版是一次全量自检的产物：读完整套代码，按"真 BUG / 可量化性能 / 过度防御"三类逐项核对，
+改动只落在确认有问题的地方。共 2 处修改，其余检查项记录在下方"查过但不改"里。
 
-## 为什么改
+## 修复
 
-同一套规则被抄了两遍，代价已经付过：
+### 登录失败的提示里有一段算出来却没人用的占位符
 
-- 代理端对话框的输入框上限早已跟随 `registration.max-password-length`，
-  纸端复制品漏了这一句 → 3.8.6 才补上"长密码输不进"；
-- 两套 `messages.yml` 各自维护，已经出现"写了没人调"的键漂移；
-- 密码策略在代理端有单测（`PasswordPolicyTest`），在纸端被内联进工具类，没有测试覆盖。
+`AuthManager` 在密码错误时构造了 `remaining`（剩余尝试次数）占位符，但
+`error.password-wrong` 与 `error.password-wrong-locked` 两条文本都不含 `{remaining}`。
+结果是每次密码错误都白做一次 Map 组装，且读代码的人会以为"提示里会显示剩余次数"。
+已删除该计算，只保留封禁提示真正用到的 `{minutes}`。
 
-## 结构
+### 版本常量重复
 
-```
-MikuAuth/
-├── common/    平台无关业务层：密码策略与哈希、失败计数、数据访问与建表、
-│              配置与文本渲染、正版/基岩判定、账号迁移、离线 UUID
-├── velocity/  代理端：事件、命令、DialogService（PacketEvents 发包）、PreAuthGate
-└── paper/     纸端：配置阶段闸门、原生 Dialog、Brigadier 命令、日志适配
-```
+上一版把版本号下沉到公共层的 `MikuVersion.VERSION`，代理端主类里还留了一个同值常量
+`MikuAuthPlugin.VERSION` 供 `@Plugin` 注解使用。注解可以直接引用公共层常量
+（仍是编译期常量），该别名已删除——少一处"改版本号要改两个地方"的机会。
 
-纸端删掉了自己那份 `Crypto` / `Store` / `Throttle` / `Messages` / `PaperConfig`，
-改用公共层的 `PasswordHasher` / `PasswordPolicy` / `DatabaseManager` / `LoginThrottle` /
-MikuConfig` / `MikuMessages`。因此纸端**顺带**获得此前只有代理端才有的能力：
+## 查过但不改（附理由，避免后人重复评估）
 
-- **MariaDB / MySQL 账号库**（`database.type`，与代理端共用同一张表）；
-- **按需下载 JDBC 驱动**（`JdbcDriverLoader`：类路径 → 数据目录 `libs/` 缓存 → 镜像下载 + SHA-256 校验），
-  不再需要把三个驱动都塞进加载器；
-- **更完整的审计与失败计数**（`AuditLogger` / `LoginThrottle`，含跨连接封禁与 IP/账号双维度）。
-
-公共层不再依赖任何日志门面：新增 `LogSink` 接口，代理端用 slf4j 适配、纸端用
-`java.util.logging` 适配。纸端也因此不再需要自带一个文本渲染器。
-
-## 配置与数据
-
-- `config.yml`、`messages.yml` **只有一份**（由 `common` 提供）。纸端读到的是同一份文件，
-  与代理端相关的段落（认证服、正版验证、会话免密等）在纸端不生效，可原样保留。
-- 新增 `dialog.allow-close-with-escape`（默认 `false`，仅纸端生效）：
-  按 Esc 关掉对话框后玩家既看不到聊天栏也无法重开，只能等超时被断开。
-- 纸端数据库文件名改由 `database.file` 决定（默认 `database.db`，与代理端一致）。
-  **首次启动会把旧的 `auth.db` 自动改名为 `database.db`**（连同 `-wal`/`-shm`），账号数据不受影响。
-
-## 构建
-
-- Maven → Gradle：提交 `gradlew` 与 wrapper，命令 `./gradlew build`（成品在 `build/dist`）。
-- 版本唯一来源是 `gradle.properties` 的 `version`；源码里的 `MikuAuthPlugin.VERSION`
-  （`@Plugin` 注解需要编译期常量）由 `checkVersionConstant` 任务校验，改漏了构建直接失败。
-- CI 一次构建同时产出 `MikuAuth-<版本>.jar`（代理端）与 `MikuAuth-Paper-<版本>.jar`（纸端），
-  两个构件版本号一致。
+- **`ConfigUpdater` 里废弃键标注机制是死代码**（`RETIRED_KEYS` 为空，两个方法永远不会产生结果）。
+  删除不影响行为，但它位于"会重写服主 config.yml"的关键路径上，删改要动 6 处相互咬合的分支；
+  收益只是少 70 行不可达代码，风险与收益不匹配，本轮不动。
+- **`/mikuauth accounts|audit` 在命令线程上 `join()` 数据库**：SQLite 单线程后端下最坏几十毫秒。
+  管理员命令频率极低、玩家无感，为此把三个子命令改成异步回调会把命令体拆散，不值。
+- **每次密码提交都重新查一次账号**：多一次主键查询，但换来"另一实例改密后立即生效"，
+  在与代理端共用 MariaDB 的多服场景下这个正确性更重要。
+- **配置阶段对话框的版本门槛**：代理端要 1.21.11（PacketEvents 的 configuration 包封装到那版才齐），
+  纸端要 1.21.6（原生 API + 协议 771）。两者不同是协议栈差异，不是遗漏。
+- **同名重连在 700ms 对话框延迟窗口内替换会话**：旧会话对象可能被弹一次框，属于显示层小瑕疵，
+  加一次会话身份比对即可，但触发条件是"0.7 秒内重连"，按本项目口径不为此加状态判断。
 
 ## 升级说明
 
-- 代理端：替换 jar 即可，配置键未改名。
-- 纸端：替换 jar 后重启；`auth.db` → `database.db` 自动迁移；旧 `messages.yml` 可保留
-  （缺失键回退内置默认值），也可删除让它重新生成。
-- 完整改动：https://github.com/JunXieX/MikuAuth/compare/v3.8.6...v3.9.0
+- 两端都只需替换 jar，配置与数据无需改动。
+- 完整改动：https://github.com/JunXieX/MikuAuth/compare/v3.9.0...v3.9.1
