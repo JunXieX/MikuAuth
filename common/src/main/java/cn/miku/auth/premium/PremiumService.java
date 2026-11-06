@@ -114,7 +114,7 @@ public final class PremiumService {
         this.logger = logger;
         this.resolvers = List.copyOf(buildResolvers(config));
         applyTuning(config);
-        this.executor = newExecutor(resolvers.size(), maxInFlightQueries);
+        this.executor = newExecutor(resolvers.size());
     }
 
     /**
@@ -128,7 +128,7 @@ public final class PremiumService {
         this.queryTimeoutMillis = queryTimeoutMillis;
         this.maxInFlightQueries = DEFAULT_MAX_IN_FLIGHT;
         this.maxInFlightPerIp = DEFAULT_PER_IP_LIMIT;
-        this.executor = newExecutor(resolvers.size(), maxInFlightQueries);
+        this.executor = newExecutor(resolvers.size());
     }
 
     /**
@@ -138,11 +138,13 @@ public final class PremiumService {
      * 任务可以无限堆积，既吃内存也对上游 API 洪泛。现在改为有界队列 + AbortPolicy，
      * 拒绝路径由 {@link #startQuery(String)} 转成"立即失败"而不是抛出。
      */
-    private static ExecutorService newExecutor(int resolverCount, int maxInFlight) {
+    private static ExecutorService newExecutor(int resolverCount) {
         int threads = Math.max(3, resolverCount * 2);
-        // 队列随准入上限一起放大（每次查询最多提交 3 个叶子任务）：
-        // 准入上限调到 100 以上时队列若还停在 256，正常排队也会被 AbortPolicy 拒绝
-        int queueCapacity = Math.max(QUEUE_CAPACITY, maxInFlight * 3);
+        // 队列按"配置允许的最大准入上限"一次给足（每次查询最多提交 3 个叶子任务）。
+        // 不能按构造时的上限算：reload 只改运行期上限、并不重建线程池，
+        // 把 max-in-flight-queries 调大后再 reload，队列就会小于在途上限，
+        // 正常查询也会撞上 AbortPolicy 被判成"无法判定"（fail-closed 下即拒绝登录）
+        int queueCapacity = Math.max(QUEUE_CAPACITY, MikuConfig.MAX_PREMIUM_IN_FLIGHT_QUERIES * 3);
         return new ThreadPoolExecutor(threads, threads, 0L, TimeUnit.MILLISECONDS,
                 new ArrayBlockingQueue<>(queueCapacity), runnable -> {
                     Thread thread = new Thread(runnable, "MikuAuth-Premium");
@@ -177,6 +179,11 @@ public final class PremiumService {
     /** 停止服务并释放线程池。 */
     public void shutdown() {
         executor.shutdownNow();
+    }
+
+    /** 仅供测试：查询线程池的队列容量（复核"队列容得下配置允许的最大在途数"）。 */
+    int queueCapacity() {
+        return ((ThreadPoolExecutor) executor).getQueue().remainingCapacity();
     }
 
     // ---------------------------------------------------------------------
