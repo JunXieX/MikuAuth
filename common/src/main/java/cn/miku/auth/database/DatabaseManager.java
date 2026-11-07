@@ -90,13 +90,39 @@ public final class DatabaseManager implements AuthRepository, AuditRepository, A
         // JDBC 驱动都不再随插件打包：由装载器按需获取
         // （类路径已提供 → 数据目录 libs/ 缓存 → 阿里云镜像下载并校验 SHA-256）
         this.driverLoader = new JdbcDriverLoader(dataDirectory, logger);
-        this.backend = createBackend(dataDirectory, config, logger, driverLoader);
-        // 有界队列：与密码线程池（有界 + AbortPolicy）保持一致的设计。
-        // SQLite 后端只有 1 个工作线程，若队列无界，一旦提交速率持续高于处理能力
-        // （例如暴破时每条失败都写审计 + 每次连接查库），任务会无限堆积导致内存缓涨。
-        // 队列满时直接拒绝，由 supply() 让调用方的 future 立即失败，而不是无限排队。
-        this.executor = new ThreadPoolExecutor(
-                backend.workerThreads(), backend.workerThreads(),
+        SqlBackend backend = null;
+        ExecutorService executor = null;
+        try {
+            backend = createBackend(dataDirectory, config, logger, driverLoader);
+            executor = newExecutor(backend.workerThreads());
+            this.backend = backend;
+            this.executor = executor;
+            initialize();
+        } catch (SQLException | IOException | RuntimeException e) {
+            // 任何一步失败都必须把已创建的资源回收掉：插件停用后实例不会被交给任何人，
+            // 没人再来调 close()。尤其是驱动装载器的 URLClassLoader —— 不关就会锁住
+            // libs/*.jar（Windows 上管理员无法按报错提示替换驱动）
+            if (executor != null) {
+                executor.shutdownNow();
+            }
+            if (backend != null) {
+                backend.close();
+            }
+            driverLoader.close();
+            throw e;
+        }
+    }
+
+    /**
+     * 数据库工作线程池：线程数由后端决定（SQLite 1，网络库 = 池大小），<b>队列有界</b>。
+     *
+     * <p>与密码线程池（有界 + AbortPolicy）保持一致的设计：若队列无界，一旦提交速率持续
+     * 高于处理能力（例如暴破时每条失败都写审计 + 每次连接查库），任务会无限堆积导致内存缓涨。
+     * 队列满时直接拒绝，由 {@link #supply} 让调用方的 future 立即失败，而不是无限排队。
+     */
+    private static ExecutorService newExecutor(int workerThreads) {
+        return new ThreadPoolExecutor(
+                workerThreads, workerThreads,
                 0L, TimeUnit.MILLISECONDS,
                 new LinkedBlockingQueue<>(QUEUE_CAPACITY),
                 runnable -> {
@@ -105,14 +131,6 @@ public final class DatabaseManager implements AuthRepository, AuditRepository, A
                     return thread;
                 },
                 new ThreadPoolExecutor.AbortPolicy());
-        try {
-            initialize();
-        } catch (SQLException e) {
-            // 初始化失败必须回收已创建的资源，否则插件停用后连接池/线程会一直挂着
-            backend.close();
-            executor.shutdownNow();
-            throw e;
-        }
     }
 
     /** 按配置选择后端；配置写错时回退 SQLite 并给出告警。 */
@@ -319,14 +337,22 @@ public final class DatabaseManager implements AuthRepository, AuditRepository, A
         });
     }
 
+    /**
+     * "同 IP 离线账号数"的唯一口径（注册配额判定与管理查询共用）。
+     *
+     * <p>注册 IP 与最近登录 IP 任一匹配即计入，按昵称去重；正版账号不计入配额
+     * （它们的创建不由玩家发起，算进来会把离线账号的名额挤没）。
+     */
+    private static final String COUNT_ACCOUNTS_BY_IP_SQL = """
+            SELECT COUNT(*) FROM (
+                SELECT nickname_lower FROM miku_players WHERE register_ip = ? AND auth_type <> ?
+                UNION
+                SELECT nickname_lower FROM miku_players WHERE last_login_ip = ? AND auth_type <> ?
+            )""";
+
     /** 配额统计（注册路径专用：复用同一个连接，避免"判定与写入不是同一时刻"）。 */
     private static int countAccountsByIp(Connection connection, String ip) throws SQLException {
-        try (PreparedStatement ps = connection.prepareStatement("""
-                SELECT COUNT(*) FROM (
-                    SELECT nickname_lower FROM miku_players WHERE register_ip = ? AND auth_type <> ?
-                    UNION
-                    SELECT nickname_lower FROM miku_players WHERE last_login_ip = ? AND auth_type <> ?
-                )""")) {
+        try (PreparedStatement ps = connection.prepareStatement(COUNT_ACCOUNTS_BY_IP_SQL)) {
             ps.setString(1, ip);
             ps.setString(2, StoredPlayer.TYPE_PREMIUM);
             ps.setString(3, ip);
@@ -453,6 +479,24 @@ public final class DatabaseManager implements AuthRepository, AuditRepository, A
         });
     }
 
+    @Override
+    public CompletableFuture<Boolean> claimPasswordless(String nickname, String passwordHash, String ip) {
+        return supply(connection -> {
+            try (PreparedStatement ps = connection.prepareStatement("""
+                    UPDATE miku_players SET password_hash = ?, last_login_ip = ?, last_login_time = ?
+                    WHERE nickname_lower = ? AND auth_type = ?
+                      AND (password_hash IS NULL OR password_hash = '')""")) {
+                ps.setString(1, passwordHash);
+                ps.setString(2, ip);
+                ps.setLong(3, System.currentTimeMillis());
+                ps.setString(4, MikuConfig.normalize(nickname));
+                ps.setString(5, StoredPlayer.TYPE_OFFLINE);
+                // 条件更新本身就是并发保护：两个人同时"认领"时只有先到的能改到行
+                return ps.executeUpdate() > 0;
+            }
+        });
+    }
+
     /**
      * 更新密码哈希。
      * 同时用于玩家自助改密（{@code /changepassword}）与管理员重置（{@code /mikuauth setpassword}）。
@@ -470,13 +514,61 @@ public final class DatabaseManager implements AuthRepository, AuditRepository, A
         });
     }
 
-    /** 删除密码（账号回到未设置密码状态）；成功返回 true。 */
+    /**
+     * 删除密码，并把账号降级为"未注册"状态（正版绑定与身份键一并解除）。
+     *
+     * <p>只清密码会留下 {@code PREMIUM + 无密码} 这一中间态：认证流程判定"该去注册"，
+     * 而注册是一条 INSERT、必然撞唯一约束，认领又只认 OFFLINE —— 玩家既登不进也注册不了，
+     * 纸端还没有别的自救入口。因此这里与 {@link #clearPremiumBinding} 一样把 auth_type
+     * 改回 OFFLINE、身份键换成由显示名推导的离线 UUID（换掉旧 Mojang UUID 还顺带避免了
+     * "正版改名迁移"把这条已被别人认领的记录搬走）。
+     *
+     * @return true = 账号存在且已更新
+     */
     public CompletableFuture<Boolean> deletePassword(String nickname) {
         return supply(connection -> {
-            try (PreparedStatement ps = connection.prepareStatement(
-                    "UPDATE miku_players SET password_hash = NULL WHERE nickname_lower = ?")) {
-                ps.setString(1, MikuConfig.normalize(nickname));
-                return ps.executeUpdate() > 0;
+            String normalized = MikuConfig.normalize(nickname);
+            boolean originalAutoCommit = connection.getAutoCommit();
+            try {
+                // 读显示名与改写放进同一笔：否则两次操作之间该行可能被改名，
+                // 算出的离线 UUID 会指错身份。SQLite 侧靠单连接串行，严格成立；
+                // MariaDB 侧普通 SELECT 不加行锁，只是一个极窄的窗口（改名与删密码同时发生）
+                connection.setAutoCommit(false);
+                String displayName;
+                try (PreparedStatement ps = connection.prepareStatement(
+                        "SELECT display_name FROM miku_players WHERE nickname_lower = ?")) {
+                    ps.setString(1, normalized);
+                    try (ResultSet rs = ps.executeQuery()) {
+                        if (!rs.next()) {
+                            connection.rollback();
+                            return false;
+                        }
+                        displayName = rs.getString(1);
+                    }
+                }
+                try (PreparedStatement ps = connection.prepareStatement("""
+                        UPDATE miku_players SET password_hash = NULL, auth_type = ?, uuid = ?
+                        WHERE nickname_lower = ?""")) {
+                    ps.setString(1, StoredPlayer.TYPE_OFFLINE);
+                    ps.setString(2, UuidUtil.format(UuidUtil.offlineUuid(displayName)));
+                    ps.setString(3, normalized);
+                    boolean updated = ps.executeUpdate() > 0;
+                    connection.commit();
+                    return updated;
+                }
+            } catch (SQLException e) {
+                try {
+                    connection.rollback();
+                } catch (SQLException ignored) {
+                    // 回滚失败不影响原始异常
+                }
+                throw e;
+            } finally {
+                try {
+                    connection.setAutoCommit(originalAutoCommit);
+                } catch (SQLException ignored) {
+                    // 恢复失败不影响返回结果
+                }
             }
         });
     }
@@ -601,22 +693,7 @@ public final class DatabaseManager implements AuthRepository, AuditRepository, A
      * 自由发起，把它们算进来会让"同 IP 下 3 个正版玩家"直接堵死第 4 个离线账号的注册。
      */
     public CompletableFuture<Integer> countAccountsByIp(String ip) {
-        return supply(connection -> {
-            try (PreparedStatement ps = connection.prepareStatement("""
-                    SELECT COUNT(*) FROM (
-                        SELECT nickname_lower FROM miku_players WHERE register_ip = ? AND auth_type <> ?
-                        UNION
-                        SELECT nickname_lower FROM miku_players WHERE last_login_ip = ? AND auth_type <> ?
-                    )""")) {
-                ps.setString(1, ip);
-                ps.setString(2, StoredPlayer.TYPE_PREMIUM);
-                ps.setString(3, ip);
-                ps.setString(4, StoredPlayer.TYPE_PREMIUM);
-                try (ResultSet rs = ps.executeQuery()) {
-                    return rs.next() ? rs.getInt(1) : 0;
-                }
-            }
-        });
+        return supply(connection -> countAccountsByIp(connection, ip));
     }
 
     /** 列出某 IP 名下的所有账号（管理查询用，含正版账号）。 */

@@ -55,18 +55,18 @@ public final class UuidUtil {
             return null;
         }
         try {
-            UUID parsed;
-            if (trimmed.length() == 32) {
-                // Mojang 的紧凑写法：补回连字符再交给 JDK
-                parsed = UUID.fromString(trimmed.substring(0, 8) + "-" + trimmed.substring(8, 12) + "-"
-                        + trimmed.substring(12, 16) + "-" + trimmed.substring(16, 20) + "-" + trimmed.substring(20));
-            } else if (trimmed.length() == 36) {
-                parsed = UUID.fromString(trimmed);
-            } else {
+            // Mojang / AuthMe 的紧凑写法是 32 位无连字符，先补回连字符再统一按规范形式校验
+            String canonical = trimmed.length() == 32
+                    ? trimmed.substring(0, 8) + "-" + trimmed.substring(8, 12) + "-"
+                            + trimmed.substring(12, 16) + "-" + trimmed.substring(16, 20) + "-"
+                            + trimmed.substring(20)
+                    : trimmed;
+            if (canonical.length() != 36) {
                 return null;
             }
+            UUID parsed = UUID.fromString(canonical);
             // 回比规范形式：排除 "1-2-3-4-5" 这类被 JDK 宽松解析出来的结果
-            return parsed.toString().equalsIgnoreCase(trimmed) ? parsed : null;
+            return parsed.toString().equalsIgnoreCase(canonical) ? parsed : null;
         } catch (IllegalArgumentException invalid) {
             return null;
         }

@@ -25,7 +25,7 @@ import java.util.concurrent.CompletableFuture;
  *   <li>audit &lt;玩家&gt; / audit ip &lt;IP&gt; —— 查询登录审计日志（谁、何时、从哪、什么方式）</li>
  *   <li>migrate &lt;来源&gt; &lt;位置&gt; [--dry-run] —— 从其他登录插件迁移账号</li>
  *   <li>diagnose &lt;玩家&gt; —— 回放该昵称的完整进服判定链路</li>
- *   <li>deletepassword &lt;玩家&gt; —— 删除玩家密码（账号回到未注册状态）</li>
+ *   <li>deletepassword &lt;玩家&gt; —— 删除密码并把账号降级为未注册（正版绑定一并解除）</li>
  *   <li>setpassword &lt;玩家&gt; &lt;新密码&gt; —— 直接重置密码（不改动账号所有权）</li>
  *   <li>passwd &lt;玩家&gt; —— 交互式重置密码（聊天栏输入，不进命令历史）</li>
  *   <li>unbind &lt;玩家&gt; —— 清除正版绑定（正版玩家改名后遗留的死记录）</li>
@@ -368,7 +368,7 @@ public final class AdminCommand implements SimpleCommand {
                         "time", format.format(new Date(entry.createdAt())),
                         "player", nvl(entry.nickname()),
                         "ip", nvl(entry.ip()),
-                        "action", describeAudit(entry.action()),
+                        "action", entry.action().displayName(),
                         "detail", nvl(entry.detail()))));
             }
         }).exceptionally(throwable -> {
@@ -376,27 +376,6 @@ public final class AdminCommand implements SimpleCommand {
                     Map.of("reason", sanitizeFailure(throwable))));
             return null;
         });
-    }
-
-    /** 审计事件类型 → 中文说明（管理员看日志时不必对照枚举名）。 */
-    private static String describeAudit(cn.miku.auth.audit.AuditAction action) {
-        return switch (action) {
-            case LOGIN_SUCCESS -> "密码登录";
-            case LOGIN_PREMIUM -> "正版免密";
-            case LOGIN_BEDROCK -> "基岩免密";
-            case LOGIN_SESSION -> "会话免密";
-            case LOGIN_FAIL -> "密码错误";
-            case REGISTER -> "注册";
-            case CHANGE_PASSWORD -> "改密";
-            case KICK_TIMEOUT -> "超时踢出";
-            case REJECT_PREMIUM_FAILED -> "正版验证失败";
-            case REJECT_NAME_SNIPE -> "昵称抢注";
-            case REJECT_IP_LIMIT -> "IP 超限";
-            case ADMIN_ACTION -> "管理员操作";
-            case MIGRATE -> "账号迁移";
-            case STALE_ACCOUNT_RELEASED -> "死昵称清理";
-            case UNKNOWN -> "未知事件";
-        };
     }
 
     /**

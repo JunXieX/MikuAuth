@@ -242,7 +242,6 @@ admin:
   need-permission: "<red>该操作需要权限节点 <yellow>{node}</yellow>。"
 
   # 破坏性操作缺少二次确认。{command} = 补全 --confirm 后的命令
-  reload: "<green>配置与语言文件已重载。"
   need-confirm: "<red>该操作不可撤销，请补上 <yellow>--confirm</yellow> 再执行：<yellow>{command}"
 
   # 查询名下账号
@@ -322,7 +321,6 @@ admin:
   audit:
     header: "<gradient:#00e0ff:#a855f7>登录审计</gradient> <dark_gray>»</dark_gray> <yellow>{key}</yellow> <gray>最近 {count} 条：</gray>"
     # {time} 时间，{player} 昵称，{ip} 来源 IP，{action} 事件，{detail} 说明
-    empty: "<gray>没有查到 <yellow>{key}</yellow> 的审计记录。</gray>"
     entry: "<dark_gray> -</dark_gray> <gray>{time}</gray> <dark_gray>|</dark_gray> <yellow>{player}</yellow> <dark_gray>|</dark_gray> <gray>{ip}</gray> <dark_gray>|</dark_gray> <white>{action}</white> <dark_gray>|</dark_gray> <gray>{detail}</gray>"
     none: "<gray>没有查到 <yellow>{key}</yellow> 的审计记录。"
     disabled: "<gray>审计日志已关闭（config.yml 的 audit.enabled）。"
@@ -333,6 +331,6 @@ admin:
     set: "<green>每 IP 账号上限已临时设置为 </green><yellow>{limit}</yellow><green>（重启后恢复配置文件值，请同步修改 config.yml）。"
     invalid: "<red>无效的数量：{input}，请输入大于等于 0 的整数。"
 
-  # 重载
+  # 重载（代理端会顺带刷新正版验证源与缓存参数，纸端只重读文件）
   reload:
-    done: "<green>配置与语言文件已重载（含正版验证源与缓存参数）。"
+    done: "<green>配置与语言文件已重载。"

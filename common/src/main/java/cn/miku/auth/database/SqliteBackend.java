@@ -31,7 +31,14 @@ final class SqliteBackend implements SqlBackend {
         // 驱动不再随插件打包：由装载器按需提供（类路径 → 数据目录 libs/ 缓存 → 镜像下载），
         // 并直接用 Driver 实例建连接（下载来的驱动无法通过 DriverManager 使用）
         this.connection = driverLoader.open(JdbcDriverLoader.SQLITE, "jdbc:sqlite:" + dbFile.toAbsolutePath());
-        configure();
+        try {
+            configure();
+        } catch (SQLException e) {
+            // 配置失败后这个连接不会再被任何人使用：不关掉会把数据库文件句柄留到进程退出
+            // （Windows 上表现为文件被锁，服主换库/拷贝时无从下手）
+            close();
+            throw e;
+        }
     }
 
     /** 设置 SQLite 性能参数。 */

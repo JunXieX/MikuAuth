@@ -141,6 +141,49 @@ class DatabaseManagerTest {
     }
 
     @Test
+    void deletePasswordAlsoReleasesPremiumBinding() throws Exception {
+        UUID premiumUuid = UUID.randomUUID();
+        database.register(premiumUuid, "Premium", "hash", StoredPlayer.TYPE_PREMIUM, "10.0.0.1")
+                .get(5, TimeUnit.SECONDS);
+
+        assertTrue(database.deletePassword("Premium").get(5, TimeUnit.SECONDS));
+
+        StoredPlayer after = database.findPlayer("Premium").get(5, TimeUnit.SECONDS).orElseThrow();
+        assertFalse(after.hasPassword());
+        // 必须同时解除正版绑定：否则留下"PREMIUM + 无密码"的第三态，
+        // 认证流程判定该注册、注册又永远撞唯一约束（玩家与管理员都无解）
+        assertFalse(after.isPremiumType());
+        assertTrue(database.findPlayerByUuid(premiumUuid).get(5, TimeUnit.SECONDS).isEmpty(),
+                "身份键应换成离线 UUID，避免正版改名迁移把这条记录搬走");
+    }
+
+    @Test
+    void claimPasswordlessTakesOverOfflineRecordWithoutPassword() throws Exception {
+        database.register(UUID.randomUUID(), "Alice", null, StoredPlayer.TYPE_OFFLINE, "10.0.0.1")
+                .get(5, TimeUnit.SECONDS);
+
+        assertTrue(database.claimPasswordless("alice", "new-hash", "10.0.0.2").get(5, TimeUnit.SECONDS));
+
+        StoredPlayer after = database.findPlayer("Alice").get(5, TimeUnit.SECONDS).orElseThrow();
+        assertEquals("new-hash", after.passwordHash());
+        // 只可能认领一次：第二次条件更新不再命中
+        assertFalse(database.claimPasswordless("Alice", "other-hash", "10.0.0.2").get(5, TimeUnit.SECONDS));
+    }
+
+    @Test
+    void claimPasswordlessRefusesPremiumRecord() throws Exception {
+        UUID premiumUuid = UUID.randomUUID();
+        database.register(premiumUuid, "Premium", null, StoredPlayer.TYPE_PREMIUM, "10.0.0.1")
+                .get(5, TimeUnit.SECONDS);
+
+        // 正版行绝不能被"注册"路径改写：否则知道昵称就能接管正版账号
+        assertFalse(database.claimPasswordless("Premium", "attack-hash", "10.0.0.2").get(5, TimeUnit.SECONDS));
+        StoredPlayer after = database.findPlayer("Premium").get(5, TimeUnit.SECONDS).orElseThrow();
+        assertTrue(after.isPremiumType());
+        assertFalse(after.hasPassword());
+    }
+
+    @Test
     void findPlayerByUuidReturnsAccount() throws Exception {
         UUID uuid = UUID.randomUUID();
         database.register(uuid, "Alice", "hash", StoredPlayer.TYPE_OFFLINE, "10.0.0.1")

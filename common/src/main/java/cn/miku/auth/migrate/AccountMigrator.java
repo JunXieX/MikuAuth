@@ -371,9 +371,20 @@ public final class AccountMigrator {
                         + "（账号或口令含 % 等特殊字符时，请改用不含这些字符的临时账号）: "
                         + maskCredentials(trimmed), e);
             }
+            String path = uri.getPath();
+            if (path == null || path.isEmpty() || "/".equals(path)) {
+                throw new IllegalArgumentException("迁移位置缺少数据库名（应为 mysql://账号:口令@主机:端口/库名）: "
+                        + maskCredentials(trimmed));
+            }
             int port = uri.getPort() > 0 ? uri.getPort() : 3306;
-            return "jdbc:mariadb://" + uri.getHost() + ":" + port + uri.getPath()
-                    + credentialsQuery(uri.getUserInfo(), trimmed);
+            String query = credentialsQuery(uri.getUserInfo(), trimmed);
+            // 管理员附带的驱动参数（useSSL / characterEncoding / serverTimezone 等）原样保留：
+            // 静默丢弃会让迁移因编码或时区差异失败，而报错里看不出参数已经丢了
+            if (uri.getRawQuery() != null && !uri.getRawQuery().isEmpty()) {
+                // 用 raw 形式：getQuery() 会把 %XX 解码，原样拼回连接串时可能被驱动再解码一次
+                query = (query.isEmpty() ? "?" : query + "&") + uri.getRawQuery();
+            }
+            return "jdbc:mariadb://" + uri.getHost() + ":" + port + path + query;
         }
         // 兜底：当作 SQLite 文件路径
         return "jdbc:sqlite:" + trimmed;

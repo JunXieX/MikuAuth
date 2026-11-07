@@ -51,6 +51,20 @@ public interface AuthRepository {
     /** 释放被"陈旧正版记录"占用的昵称（死昵称清理）。 */
     CompletableFuture<Boolean> releaseStaleAccount(String nickname, UUID expectedUuid);
 
+    /**
+     * 给"存在但没有密码"的离线记录补上密码（注册撞到唯一约束时的收尾）。
+     *
+     * <p>正版玩家首次进入会自动登记一条无密码记录，{@code deletepassword} 也会留下同样的形态。
+     * 这类昵称的注册 INSERT 必然撞唯一约束，若不当场认领，玩家会陷入
+     * "提示该注册 → 注册又提示已被注册"的死循环。
+     *
+     * <p>只认 {@link StoredPlayer#TYPE_OFFLINE}：正版记录要由正版判定或管理员 unbind 处理，
+     * 不能靠注册流程改写（那等于把正版昵称开放给任何知道昵称的人）。
+     *
+     * @return true = 确实补上了密码（昵称归本次注册者）
+     */
+    CompletableFuture<Boolean> claimPasswordless(String nickname, String passwordHash, String ip);
+
     /** 更新密码哈希。 */
     CompletableFuture<Boolean> updatePassword(String nickname, String passwordHash);
 

@@ -101,7 +101,6 @@ public final class LoginThrottle {
         return nameLock != null ? nameLock : ipLock;
     }
 
-    /** 登录成功后清零计数。 */
     /**
      * 认证成功后的计数重置：<b>只清账号维度</b>。
      *
@@ -109,7 +108,7 @@ public final class LoginThrottle {
      * 就能把该 IP 上"换昵称撞库"的计数清零，IP 维度的保护被反复重置。
      * IP 计数改为随窗口自然过期；确需立刻解除由管理员 {@code /mikuauth unlock <IP>} 显式操作。
      */
-    public void reset(String ip, String nickname) {
+    public void resetAccount(String nickname) {
         if (nickname != null) {
             counters.remove(subjectName(nickname));
         }

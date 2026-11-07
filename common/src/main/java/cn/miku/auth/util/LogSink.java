@@ -29,11 +29,6 @@ public interface LogSink {
         return Noop.INSTANCE;
     }
 
-    /** 打到标准输出（单元测试用；两端在运行期都有自己的实现）。 */
-    static LogSink console() {
-        return Console.INSTANCE;
-    }
-
     /** slf4j 风格的 {@code {} } 占位符替换；参数不足时保留占位符原样，避免再抛一次异常。 */
     static String format(String format, Object... args) {
         if (format == null) {
@@ -90,39 +85,4 @@ public interface LogSink {
         }
     }
 
-    /** 标准输出实现。 */
-    final class Console implements LogSink {
-        private static final Console INSTANCE = new Console();
-
-        private Console() {
-        }
-
-        @Override
-        public void info(String format, Object... args) {
-            System.out.println("[INFO] " + LogSink.format(format, args));
-        }
-
-        @Override
-        public void warn(String format, Object... args) {
-            System.out.println("[WARN] " + LogSink.format(format, args));
-        }
-
-        @Override
-        public void error(String format, Object... args) {
-            System.err.println("[ERROR] " + LogSink.format(format, args));
-        }
-
-        @Override
-        public void debug(String format, Object... args) {
-            System.out.println("[DEBUG] " + LogSink.format(format, args));
-        }
-
-        @Override
-        public void error(String message, Throwable throwable) {
-            System.err.println("[ERROR] " + message);
-            if (throwable != null) {
-                throwable.printStackTrace(System.err);
-            }
-        }
-    }
 }

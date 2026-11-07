@@ -18,6 +18,7 @@ import com.velocitypowered.api.proxy.server.RegisteredServer;
 import net.kyori.adventure.text.Component;
 
 import java.net.InetSocketAddress;
+import java.util.HashSet;
 import java.util.Locale;
 import java.util.Set;
 import java.util.UUID;
@@ -51,6 +52,15 @@ public final class AuthListener {
     private final MikuConfig config;
     private final AuthManager authManager;
 
+    /**
+     * 启动时注册的命令别名（小写、不含斜杠）。
+     *
+     * <p>命令只在启动时注册一次（{@code /mikuauth reload} 不会重新注册别名），
+     * 因此未认证白名单必须用这份快照：实时读配置的话，reload 改过别名后旧别名会立刻失去豁免
+     * —— 玩家打的是仍然存在的命令，却被告知"请先完成登录"。
+     */
+    private final Set<String> registeredAliases;
+
     /** 正版 UUID 校验失败的待踢出玩家（PostLogin 时执行）。 */
     private final ConcurrentHashMap<UUID, Component> pendingDenials = new ConcurrentHashMap<>();
 
@@ -59,6 +69,9 @@ public final class AuthListener {
         this.logger = logger;
         this.config = config;
         this.authManager = authManager;
+        Set<String> aliases = new HashSet<>(config.loginAliases());
+        aliases.addAll(config.registerAliases());
+        this.registeredAliases = Set.copyOf(aliases);
     }
 
     // ---------------------------------------------------------------------
@@ -74,7 +87,7 @@ public final class AuthListener {
     @Subscribe
     public com.velocitypowered.api.event.EventTask onPreLogin(PreLoginEvent event) {
         String username = event.getUsername();
-        String ip = remoteIp(event);
+        String ip = remoteIp(event.getConnection().getRemoteAddress());
         return com.velocitypowered.api.event.EventTask.resumeWhenComplete(
                 authManager.decideLoginModeAsync(username, ip).thenAccept(decision -> {
                     switch (decision.mode()) {
@@ -88,21 +101,9 @@ public final class AuthListener {
                 }));
     }
 
-    /** 取连接来源 IP；不可用时返回 null（决策链会跳过会话判定）。 */
-    private static String remoteIp(PreLoginEvent event) {
+    /** 取连接来源 IP；取不到时返回 null（决策链会跳过会话判定，失败计数按 null 处理）。 */
+    private static String remoteIp(InetSocketAddress address) {
         try {
-            InetSocketAddress address = event.getConnection().getRemoteAddress();
-            return address == null || address.getAddress() == null
-                    ? null : address.getAddress().getHostAddress();
-        } catch (Throwable t) {
-            return null;
-        }
-    }
-
-    /** 取在线玩家来源 IP（断开事件用）。 */
-    private static String remoteIp(Player player) {
-        try {
-            InetSocketAddress address = player.getRemoteAddress();
             return address == null || address.getAddress() == null
                     ? null : address.getAddress().getHostAddress();
         } catch (Throwable t) {
@@ -157,7 +158,8 @@ public final class AuthListener {
         AuthManager.LoginMode mode = authManager.lastLoginModeFor(player.getUsername());
         boolean bypassLimbo = (mode == AuthManager.LoginMode.PREMIUM)
                 || authManager.isBedrockPlayer(player.getUniqueId())
-                || authManager.isSessionVerifiedFor(player.getUsername(), remoteIp(player));
+                || authManager.isSessionVerifiedFor(player.getUsername(),
+                        remoteIp(player.getRemoteAddress()));
         if (bypassLimbo) {
             RegisteredServer target = authManager.resolvePostAuthTarget();
             if (target != null) {
@@ -255,7 +257,7 @@ public final class AuthListener {
         if (space > 0) {
             label = label.substring(0, space);
         }
-        label = label.replaceFirst("^/", "").toLowerCase(Locale.ROOT);
+        label = (label.startsWith("/") ? label.substring(1) : label).toLowerCase(Locale.ROOT);
         if (isAuthCommand(label)) {
             return;
         }
@@ -263,15 +265,11 @@ public final class AuthListener {
         authManager.handleDeniedCommand(player);
     }
 
-    /**
-     * 是否为未认证玩家可用的命令。
-     * 别名从配置实时读取，保证与命令注册所用的 aliases 完全一致（含 /mikuauth reload 之后）。
-     */
+    /** 是否为未认证玩家可用的命令（别名取注册时的快照，见 {@link #registeredAliases}）。 */
     private boolean isAuthCommand(String label) {
-        if (STATIC_AUTH_COMMANDS.contains(label) || AUTH_COMMAND_ROOTS.contains(label)) {
-            return true;
-        }
-        return config.loginAliases().contains(label) || config.registerAliases().contains(label);
+        return STATIC_AUTH_COMMANDS.contains(label)
+                || AUTH_COMMAND_ROOTS.contains(label)
+                || registeredAliases.contains(label);
     }
 
     // ---------------------------------------------------------------------
@@ -284,11 +282,11 @@ public final class AuthListener {
         // 登录阶段断开原因分析（正版会话校验失败 / 同名冲突等）
         if (event.getLoginStatus() != DisconnectEvent.LoginStatus.SUCCESSFUL_LOGIN) {
             authManager.logJoinFailure(player.getUsername(), event.getLoginStatus(),
-                    remoteIp(player));
+                    remoteIp(player.getRemoteAddress()));
         }
         pendingDenials.remove(player.getUniqueId());
         // 传连接与来源 IP：认证标记与会话免密标记都要按"这条连接"清理，
         // 直接按 UUID/昵称清会误伤同名双连接中的另一条
-        authManager.handleDisconnect(player, remoteIp(player));
+        authManager.handleDisconnect(player, remoteIp(player.getRemoteAddress()));
     }
 }

@@ -74,6 +74,12 @@ public final class PreJoinGate implements Listener {
     /** 对话框协议自 1.21.6（协议号 771）起才有 dialog / custom click 包。 */
     private static final int DIALOG_MIN_PROTOCOL = 771;
 
+    /** 同一 IP 两次提交的最小间隔（毫秒）：每次提交都会算一次 BCrypt，不能连点重算。 */
+    private static final long SUBMIT_INTERVAL_MILLIS = 400;
+    /** 提交节流表的上限与保留时长（按时间清理，避免随独立 IP 数无限增长）。 */
+    private static final int SUBMIT_THROTTLE_MAX_ENTRIES = 4096;
+    private static final long SUBMIT_THROTTLE_RETAIN_MILLIS = 60_000L;
+
     private final MikuAuthPlugin plugin;
     /**
      * 正在配置阶段等待认证的连接。
@@ -84,6 +90,8 @@ public final class PreJoinGate implements Listener {
     private final ConcurrentHashMap<PlayerConfigurationConnection, Session> sessions = new ConcurrentHashMap<>();
     /** 认证通过时的提示：配置阶段没有聊天栏，留到进世界后补发。 */
     private final ConcurrentHashMap<String, Component> pendingChat = new ConcurrentHashMap<>();
+    /** 来源 IP → 上次提交时刻（提交会算一次 BCrypt，不能任其连点重算）。 */
+    private final ConcurrentHashMap<String, Long> lastSubmitByIp = new ConcurrentHashMap<>();
 
     PreJoinGate(MikuAuthPlugin plugin) {
         this.plugin = plugin;
@@ -157,7 +165,7 @@ public final class PreJoinGate implements Listener {
 
         Optional<StoredPlayer> account = findAccount(name);
         if (account == null) {
-            // 数据库不可用：不能把玩家推去"注册"（会撞唯一约束），直接说明情况
+            // 数据库不可用：连该弹登录框还是注册框都判不出来，直接说明情况
             fail(connection, "kick.auth-error", Map.of());
             return;
         }
@@ -167,7 +175,7 @@ public final class PreJoinGate implements Listener {
         try {
             showDialog(session, null);
             // 阻塞到提交成功 / 超次断开 / 超时；服务端在此期间不会让玩家进入世界
-            session.done.get(timeoutSeconds(), TimeUnit.SECONDS);
+            session.done.get(plugin.config().preAuthTimeoutSeconds(), TimeUnit.SECONDS);
         } catch (TimeoutException timeout) {
             if (session.finish()) {
                 plugin.audit().record(AuditAction.KICK_TIMEOUT, name, profile.getId(), ip, "配置阶段认证超时");
@@ -207,6 +215,12 @@ public final class PreJoinGate implements Listener {
             // 排障锚点：点得到按钮但拿不到输入值时，日志直接指认是"没有 payload"还是"缺字段"
             plugin.log().warn("[认证] {} 的对话框提交缺少 password，payload={}", session.name,
                     view == null ? "<无响应数据>" : view.payload().string());
+        }
+        if (!allowSubmit(session.ip)) {
+            // 同 IP 提交过快：这一次不算哈希，但必须把对话框重画一遍 ——
+            // 客户端点了按钮就切到"等待响应"屏，静默丢弃会让它停在那里直到超时被断开
+            showDialog(session, null);
+            return;
         }
         if (!session.beginSubmit()) {
             return;
@@ -289,11 +303,21 @@ public final class PreJoinGate implements Listener {
         }
         switch (result) {
             case OK -> succeed(session, "auth.success.register", AuditAction.REGISTER, "注册并登录（进服前）");
-            case DUPLICATE -> retry(session, "error.already-registered", Map.of());
+            case DUPLICATE -> {
+                // 占用该昵称的若是"没有密码"的记录（正版自动登记 / deletepassword 遗留），
+                // 直接补密码完成注册；否则这条昵称会一直卡在"请注册 → 已被注册"之间
+                if (!claimExisting(session, hash)) {
+                    retry(session, "error.already-registered", Map.of());
+                }
+            }
             case IP_LIMIT -> {
-                plugin.audit().record(AuditAction.REJECT_IP_LIMIT, session.name, session.id, session.ip,
-                        "该 IP 名下账号数已达上限 " + plugin.config().maxAccountsPerIp());
-                retry(session, "error.ip-limit", Map.of());
+                // 认领已有记录不占新名额：删过密码的账号重新注册时，该 IP 的名额可能已经满了，
+                // 先按"认领"处理，认领不到才按超限拒绝
+                if (!claimExisting(session, hash)) {
+                    plugin.audit().record(AuditAction.REJECT_IP_LIMIT, session.name, session.id, session.ip,
+                            "该 IP 名下账号数已达上限 " + plugin.config().maxAccountsPerIp());
+                    retry(session, "error.ip-limit", Map.of());
+                }
             }
             default -> retry(session, "error.server-busy", Map.of());
         }
@@ -364,7 +388,7 @@ public final class PreJoinGate implements Listener {
         if (!session.finish()) {
             return;
         }
-        plugin.throttle().reset(session.ip, session.name);
+        plugin.throttle().resetAccount(session.name);
         try {
             // 纸端不做同 IP 会话免密（每次进服都要认证），因此会话有效期传 0
             plugin.db().finishLogin(session.name, session.ip, 0L).join();
@@ -378,18 +402,62 @@ public final class PreJoinGate implements Listener {
         session.done.complete(null);
     }
 
+    /**
+     * 同 IP 提交准入：两次提交至少间隔 {@link #SUBMIT_INTERVAL_MILLIS}。
+     *
+     * <p>每次提交都会算一次 BCrypt（cost=10 约 100ms CPU），没有准入时一条连接循环点提交
+     * 就能持续占满一个核，多开几条连接还能放大。口径与代理端"同 IP 400ms"保持一致；
+     * 取不到 IP（理论上的本地/代理场景）时放行，不能让取不到地址把正常玩家挡在门外。
+     */
+    private boolean allowSubmit(String ip) {
+        if (ip == null || ip.isEmpty()) {
+            return true;
+        }
+        long now = System.currentTimeMillis();
+        Long previous = lastSubmitByIp.get(ip);
+        // 先判后写：被拒的点击不刷新时间戳。否则连点会一直把窗口往后推，
+        // 玩家越急着点越永远轮不到自己（代理端 tryAcquireCryptoSlot 也是这个顺序）
+        if (previous != null && now - previous < SUBMIT_INTERVAL_MILLIS) {
+            return false;
+        }
+        lastSubmitByIp.put(ip, now);
+        if (lastSubmitByIp.size() > SUBMIT_THROTTLE_MAX_ENTRIES) {
+            lastSubmitByIp.values().removeIf(at -> now - at > SUBMIT_THROTTLE_RETAIN_MILLIS);
+        }
+        return true;
+    }
+
+    /** 认领"存在但无密码"的旧记录，成功即完成注册并放行。 */
+    private boolean claimExisting(Session session, String hash) {
+        if (!claimPasswordless(session, hash)) {
+            return false;
+        }
+        succeed(session, "auth.success.register", AuditAction.REGISTER, "注册并登录（认领原有账号，进服前）");
+        return true;
+    }
+
+    /** 尝试给"存在但无密码"的账号补上密码；数据库故障一律按"未认领"处理。 */
+    private boolean claimPasswordless(Session session, String hash) {
+        try {
+            return plugin.db().claimPasswordless(session.name, hash, session.ip).join();
+        } catch (RuntimeException e) {
+            plugin.log().warn("[注册] {} 认领无密码账号失败: {}", session.name, e.toString());
+            return false;
+        }
+    }
+
     private void retry(Session session, String errorKey, Map<String, String> placeholders) {
         if (session.finished()) {
             return;
         }
-        showDialog(session, render(plugin.messages().raw(errorKey), placeholders));
+        showDialog(session, plugin.messages().component(errorKey, placeholders));
     }
 
     // ------------------------------------------------------------------
     // 对话框
     // ------------------------------------------------------------------
 
-    private void showDialog(Session session, String errorLine) {
+    private void showDialog(Session session, Component errorLine) {
         // 发包线程不敏感，但对话框构建会碰服务端注册表，统一回主线程做
         if (Bukkit.isPrimaryThread()) {
             draw(session, errorLine);
@@ -398,7 +466,7 @@ public final class PreJoinGate implements Listener {
         }
     }
 
-    private void draw(Session session, String errorLine) {
+    private void draw(Session session, Component errorLine) {
         try {
             session.connection.getAudience().showDialog(buildDialog(session, errorLine));
         } catch (Throwable t) {
@@ -411,17 +479,19 @@ public final class PreJoinGate implements Listener {
         }
     }
 
-    private Dialog buildDialog(Session session, String errorLine) {
+    private Dialog buildDialog(Session session, Component errorLine) {
         var config = plugin.config();
         String base = session.registering ? "dialog.register" : "dialog.login";
         Map<String, String> placeholders = Map.of(
                 "player", session.name,
-                "seconds", String.valueOf(timeoutSeconds()));
+                "seconds", String.valueOf(config.preAuthTimeoutSeconds()));
 
         Component body = plugin.messages().component(base + ".body", placeholders);
-        if (errorLine != null && !errorLine.isEmpty()) {
+        if (errorLine != null) {
+            // 错误行必须传入已渲染的组件：它的原文是 MiniMessage（messages.yml 里带 <red> 等标签），
+            // 用 Component.text 拼会把标签当字面量显示给玩家
             body = Component.text().append(body).append(Component.newline())
-                    .append(plugin.messages().component("prefix")).append(Component.text(errorLine)).build();
+                    .append(plugin.messages().component("prefix")).append(errorLine).build();
         }
         // 文本框上限必须跟着注册策略走：Paper 的默认值只有 32，配置放宽后
         // 玩家根本输不进第 33 个字符，代理端注册的长密码账号会永久登录失败
@@ -460,29 +530,9 @@ public final class PreJoinGate implements Listener {
                 .type(DialogType.multiAction(List.of(button)).columns(1).build()));
     }
 
-    /** 用已经解析过的文本做占位符替换（错误行来自 messages 原文，这里只补占位符）。 */
-    private String render(String raw, Map<String, String> placeholders) {
-        String text = raw;
-        for (Map.Entry<String, String> entry : placeholders.entrySet()) {
-            text = text.replace("{" + entry.getKey() + "}", entry.getValue());
-        }
-        return text;
-    }
-
     // ------------------------------------------------------------------
     // 工具
     // ------------------------------------------------------------------
-
-    /**
-     * 配置阶段等待上限（秒）。
-     *
-     * <p>共用配置里 {@code login.timeout-seconds: 0} 表示"不限时"，那是代理端的语义（由会话状态机兜底）；
-     * 纸端一旦不限时，连接会永久停在配置阶段，服务端与玩家都没有退路，因此这里必须给一个有界的上限。
-     */
-    private int timeoutSeconds() {
-        int configured = plugin.config().authTimeoutSeconds();
-        return configured > 0 ? configured : 600;
-    }
 
     /** 查账号；数据库故障返回 null（与"查无此人"区分开）。 */
     private Optional<StoredPlayer> findAccount(String name) {
@@ -544,7 +594,9 @@ public final class PreJoinGate implements Listener {
             Class<?> apiClass = Class.forName("com.viaversion.viaversion.api.ViaAPI");
             Object api = Class.forName("com.viaversion.viaversion.api.Via").getMethod("getAPI").invoke(null);
             int protocol = (int) apiClass.getMethod("getPlayerVersion", UUID.class).invoke(api, playerId);
-            return protocol >= DIALOG_MIN_PROTOCOL;
+            // ViaVersion 对"尚未登记该玩家"返回 -1：那代表版本未知，按"支持"处理，
+            // 只有明确拿到低于门槛的正数才判定为低版本（否则会把正常客户端误踢）
+            return protocol <= 0 || protocol >= DIALOG_MIN_PROTOCOL;
         } catch (Throwable ignored) {
             // 反射失败按"支持"处理：宁可弹一个可能不显示的框，也不要误踢正常客户端
             return true;

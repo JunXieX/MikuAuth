@@ -135,23 +135,38 @@ public final class PreAuthGate {
         return serverName != null && authServer != null && serverName.equalsIgnoreCase(authServer);
     }
 
-    /** 放行：认证成功（或决定降级为 post 流程）。 */
+    /** 放行：认证成功，需要在玩家进入 play 阶段后补发提示并安排转服。 */
     public void release(Player player) {
-        Held entry = held.remove(player.getUniqueId());
-        if (entry == null) {
-            return;
+        if (releaseHeld(player.getUniqueId())) {
+            justReleased.add(player.getUniqueId());
+            logger.debug("[认证] {} 已放行进入世界（配置阶段认证结束）", player.getUsername());
         }
-        justReleased.add(player.getUniqueId());
+    }
+
+    /**
+     * 降级放行：闸门不再扣住这条连接，但<b>没有</b>完成认证。
+     *
+     * <p>与 {@link #release} 的区别只在"要不要打成功标记"：降级的连接随后会在 play 阶段
+     * 重新走认证流程，若打上标记，它真正完成认证并转服时会被再补发一次成功提示。
+     */
+    public void downgrade(Player player) {
+        releaseHeld(player.getUniqueId());
+    }
+
+    private boolean releaseHeld(UUID playerId) {
+        Held entry = held.remove(playerId);
+        if (entry == null) {
+            return false;
+        }
         entry.finish.complete(null);
-        logger.debug("[认证] {} 已放行进入世界（配置阶段认证结束）", player.getUsername());
+        return true;
     }
 
     /** 丢弃闸门状态（断线、踢出、插件关停）。 */
     public void forget(UUID playerId) {
-        Held entry = held.remove(playerId);
-        if (entry != null) {
-            entry.finish.complete(null);
-        }
+        releaseHeld(playerId);
+        // 连接已经没了，"刚放行"标记再留着只会在下一次同名连接上被误消费
+        justReleased.remove(playerId);
     }
 
     /** 该连接当前是否被扣在配置阶段。 */
@@ -163,11 +178,6 @@ public final class PreAuthGate {
     public long heldSeconds(UUID playerId) {
         Held entry = held.get(playerId);
         return entry == null ? 0L : (System.currentTimeMillis() - entry.startedAt) / 1000L;
-    }
-
-    /** 当前被扣住的连接数（诊断/日志用）。 */
-    public int heldCount() {
-        return held.size();
     }
 
     /**

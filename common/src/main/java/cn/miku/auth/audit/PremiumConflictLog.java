@@ -3,19 +3,9 @@ package cn.miku.auth.audit;
 import cn.miku.auth.config.MikuConfig;
 import cn.miku.auth.util.LogSink;
 
-import java.io.IOException;
-import java.nio.charset.StandardCharsets;
-import java.nio.file.Files;
 import java.nio.file.Path;
-import java.nio.file.StandardCopyOption;
-import java.nio.file.StandardOpenOption;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.LinkedBlockingQueue;
-import java.util.concurrent.RejectedExecutionException;
-import java.util.concurrent.ThreadPoolExecutor;
-import java.util.concurrent.TimeUnit;
 
 /**
  * 昵称冲突记录文件。
@@ -31,23 +21,12 @@ import java.util.concurrent.TimeUnit;
  * 因此<b>这类失败不产生任何事件，也不会出现在本文件里</b> ——
  * 玩家只会看到客户端原生的「无效会话（Invalid session）」，
  * 服务端侧的线索在代理控制台（hasJoined 校验失败）与 {@code /mikuauth diagnose} 里。
- * 2026-09-22 之前本文件按"任意进服失败都算昵称冲突"写入，实测 16 条记录全部是误报，已修正。
  *
  * <p><b>为什么仍然单独落盘</b>：与控制台日志分离，不受日志轮转影响，
  * 便于管理员在没有在线的时间里事后核对"谁在什么时候、从哪个 IP 因同名冲突被顶下线"。
- *
- * <p>设计要点：
- * <ul>
- *   <li><b>旁路</b>：写入失败只记 WARN，绝不影响认证流程；</li>
- *   <li><b>线程安全</b>：事件可能来自不同 Netty 线程，写入串行化；</li>
- *   <li><b>自动轮转</b>：超过 5MB 时把旧文件改名为 {@code .1}，避免无限增长；</li>
- *   <li><b>首行说明</b>：文件头部写明成因与处理方式，日后翻看无需查代码。</li>
- * </ul>
+ * 写入机制（异步入队、文件头、轮转、关服排空）见 {@link LineFileLog}。
  */
 public final class PremiumConflictLog {
-
-    /** 单文件上限（超过即轮转为 .1）。 */
-    private static final long MAX_BYTES = 5L * 1024 * 1024;
 
     private static final DateTimeFormatter TIME_FORMAT =
             DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
@@ -73,72 +52,31 @@ public final class PremiumConflictLog {
             #
             """;
 
-    /** 目标文件；null 表示未启用。 */
-    private final Path file;
-    private final LogSink logger;
-
-    /**
-     * 写盘线程池：单线程 + 有界队列。
-     *
-     * <p>调用方是 Netty 事件线程（{@code DisconnectEvent}），**绝不能在事件线程上做磁盘 IO**：
-     * 多条冲突事件同时到达时会串行阻塞事件线程，殃及所有玩家的断线处理。
-     * 因此这里改为入队后立即返回。队列满时直接拒绝并记 WARN——
-     * 记录是观测手段，宁可丢一条日志也不能拖慢事件线程。
-     */
-    private final ExecutorService writer;
-
-    /** 写盘队列上限。 */
-    private static final int QUEUE_CAPACITY = 512;
+    private final LineFileLog log;
 
     public PremiumConflictLog(Path dataDirectory, MikuConfig config, LogSink logger) {
-        this.logger = logger;
-        String configured = config.premiumConflictLogFile();
-        // 同 BackendKickLog：文件名落地前先做越界检查
-        this.file = configured == null || configured.isBlank()
-                ? null
-                : cn.miku.auth.util.PathSafety.resolveInside(
-                        dataDirectory, configured, "premium-conflicts.log", logger);
-        this.writer = new ThreadPoolExecutor(1, 1, 0L, TimeUnit.MILLISECONDS,
-                new LinkedBlockingQueue<>(QUEUE_CAPACITY),
-                runnable -> {
-                    Thread thread = new Thread(runnable, "MikuAuth-ConflictLog");
-                    thread.setDaemon(true);
-                    return thread;
-                },
-                new ThreadPoolExecutor.AbortPolicy());
+        this.log = new LineFileLog(dataDirectory, config.premiumConflictLogFile(),
+                "premium-conflicts.log", HEADER, "[正版冲突记录]", "MikuAuth-ConflictLog", logger);
     }
 
     /** 插件关闭时调用：等待队列排空，避免丢掉最后几条记录。 */
     public void shutdown() {
-        writer.shutdown();
-        try {
-            if (!writer.awaitTermination(3, TimeUnit.SECONDS)) {
-                writer.shutdownNow();
-            }
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            writer.shutdownNow();
-        }
+        log.shutdown();
     }
 
     /** 等待已入队的记录全部落盘（测试与关服时使用）。 */
     public void flush() {
-        try {
-            writer.submit(() -> {
-            }).get(3, TimeUnit.SECONDS);
-        } catch (Exception e) {
-            logger.warn("[正版冲突记录] 等待落盘超时: {}", e.toString());
-        }
+        log.flush();
     }
 
     /** 是否启用（配置为空则关闭）。 */
     public boolean enabled() {
-        return file != null;
+        return log.enabled();
     }
 
     /** 记录文件路径（诊断/启动日志用）。 */
     public Path file() {
-        return file;
+        return log.file();
     }
 
     /**
@@ -150,48 +88,14 @@ public final class PremiumConflictLog {
      * @param detail   补充说明（例如该昵称的判定来源）
      */
     public void record(String nickname, String ip, String status, String detail) {
-        if (file == null) {
+        if (!log.enabled()) {
             return;
         }
-        String line = TIME_FORMAT.format(LocalDateTime.now())
+        log.append(TIME_FORMAT.format(LocalDateTime.now())
                 + " | " + nickname
                 + " | " + (ip == null || ip.isEmpty() ? "-" : ip)
                 + " | " + status
                 + " | " + detail
-                + System.lineSeparator();
-        try {
-            // 事件线程只做入队，磁盘 IO 交给写盘线程
-            writer.execute(() -> writeLine(line));
-        } catch (RejectedExecutionException e) {
-            logger.warn("[正版冲突记录] 写入队列已满，丢弃一条 {} 的记录（插件关闭中或磁盘过慢）", nickname);
-        }
-    }
-
-    /** 实际写盘；只在单线程写盘器内执行，因此无需额外同步。 */
-    private void writeLine(String line) {
-        try {
-            Path parent = file.getParent();
-            if (parent != null) {
-                Files.createDirectories(parent);
-            }
-            rotateIfNeeded();
-            boolean fresh = !Files.exists(file) || Files.size(file) == 0L;
-            Files.writeString(file, fresh ? HEADER + line : line,
-                    StandardCharsets.UTF_8,
-                    StandardOpenOption.CREATE, StandardOpenOption.APPEND);
-        } catch (Throwable t) {
-            // 记录失败绝不能影响认证流程
-            logger.warn("[正版冲突记录] 写入 {} 失败: {}", file, t.toString());
-        }
-    }
-
-    /** 超过上限时把当前文件改名为 .1（只保留一份历史）。 */
-    private void rotateIfNeeded() throws IOException {
-        if (!Files.exists(file) || Files.size(file) <= MAX_BYTES) {
-            return;
-        }
-        Path rotated = file.resolveSibling(file.getFileName() + ".1");
-        Files.move(file, rotated, StandardCopyOption.REPLACE_EXISTING);
-        logger.info("[正版冲突记录] 文件超过 {} MB，已轮转为 {}", MAX_BYTES / 1024 / 1024, rotated.getFileName());
+                + System.lineSeparator(), nickname);
     }
 }

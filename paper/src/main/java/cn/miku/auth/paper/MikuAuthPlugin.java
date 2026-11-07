@@ -50,8 +50,9 @@ public final class MikuAuthPlugin extends JavaPlugin {
         this.messages = new MikuMessages();
 
         try {
-            migrateLegacyDatabaseFile();
+            // 配置必须先读：旧库改名的目标文件名来自 database.file
             config.load(dataDirectory, sink);
+            migrateLegacyDatabaseFile();
             messages.load(dataDirectory, sink);
             this.database = new DatabaseManager(dataDirectory, config, sink);
         } catch (IOException | SQLException | RuntimeException e) {
@@ -94,7 +95,9 @@ public final class MikuAuthPlugin extends JavaPlugin {
         try {
             config.load(dataDirectory, sink);
             messages.load(dataDirectory, sink);
-        } catch (IOException e) {
+        } catch (IOException | RuntimeException e) {
+            // RuntimeException 也要兜：YAML 语法错误抛的是 unchecked 的 YAMLException，
+            // 漏掉它会让异常冲出命令执行体（管理员得不到任何提示）
             getLogger().warning("配置重载失败（继续使用内存中的旧值）: " + e);
         }
     }
@@ -108,19 +111,24 @@ public final class MikuAuthPlugin extends JavaPlugin {
      */
     private void migrateLegacyDatabaseFile() {
         Path legacy = dataDirectory.resolve("auth.db");
-        Path current = dataDirectory.resolve("database.db");
-        if (Files.notExists(legacy) || Files.exists(current)) {
+        Path current = dataDirectory.resolve(config.databaseFile()).toAbsolutePath().normalize();
+        if (Files.notExists(legacy) || Files.exists(current)
+                || legacy.toAbsolutePath().normalize().equals(current)) {
             return;
         }
         try {
+            Path parent = current.getParent();
+            if (parent != null) {
+                Files.createDirectories(parent);
+            }
             Files.move(legacy, current);
             for (String suffix : new String[]{"-wal", "-shm"}) {
                 Path sidecar = dataDirectory.resolve("auth.db" + suffix);
                 if (Files.exists(sidecar)) {
-                    Files.move(sidecar, dataDirectory.resolve("database.db" + suffix));
+                    Files.move(sidecar, current.resolveSibling(current.getFileName() + suffix));
                 }
             }
-            getLogger().info("已把旧版数据库 auth.db 迁移为 database.db（账号数据保持不变）");
+            getLogger().info("已把旧版数据库 auth.db 迁移为 " + current.getFileName() + "（账号数据保持不变）");
         } catch (IOException e) {
             getLogger().warning("旧版数据库迁移失败，将按新文件名新建库（旧文件仍保留为 auth.db）: " + e);
         }

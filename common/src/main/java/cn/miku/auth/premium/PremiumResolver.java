@@ -60,9 +60,11 @@ class PremiumResolver {
         if (uuid == null || (uuid.getMostSignificantBits() == 0L && uuid.getLeastSignificantBits() == 0L)) {
             return PremiumResolution.unknown(config.id(), "UUID 解析失败");
         }
-        // 规范昵称与请求昵称大小写不敏感地一致才可信（防止镜像站返回错误档案）
+        // 规范昵称与请求昵称大小写不敏感地一致才可信（防止镜像站返回错误档案）。
+        // 不一致只能说明"这次响应不能采信"，绝不能按 OFFICIAL 的 OFFLINE 处理：
+        // 权威源的 OFFLINE 会驱动调用方清理库中记录、释放昵称，误判一次就毁号
         if (!nameRaw.equalsIgnoreCase(username)) {
-            return PremiumResolution.offline(config.id(), "昵称不匹配", config.authoritative());
+            return PremiumResolution.unknown(config.id(), "昵称不匹配");
         }
         return PremiumResolution.premium(uuid, nameRaw, config.id(), config.authoritative());
     }

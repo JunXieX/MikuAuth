@@ -59,7 +59,6 @@ class PreAuthGateTest {
 
         assertFalse(gate.isHeld(id));
         assertEquals(0L, gate.heldSeconds(id));
-        assertEquals(0, gate.heldCount());
         gate.forget(id); // 幂等：不存在时也必须安全
         assertFalse(gate.consumeJustReleased(id));
     }

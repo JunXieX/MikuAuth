@@ -220,7 +220,7 @@ public final class TransferCoordinator {
             return;
         }
         player.createConnectionRequest(target).connect().whenComplete((result, throwable) -> {
-            if (throwable == null && result != null && result.isSuccessful()) {
+            if (throwable == null && result.isSuccessful()) {
                 logRecovered(player, serverName, state);
                 return;
             }
@@ -231,7 +231,7 @@ public final class TransferCoordinator {
             // （ConnectionRequestResults.forDisconnect：status=SERVER_DISCONNECTED、reason=踢出原因、
             //  safe=true ⇒ Velocity 不会替玩家发 Disconnect 包）。
             // 这条原因只有插件看得到：玩家此刻还留在认证服，踢出发生在去目标服的那条连接上。
-            Optional<Component> reason = result != null ? result.getReasonComponent() : Optional.empty();
+            Optional<Component> reason = result.getReasonComponent();
             if (reason.isPresent()) {
                 forwardBackendRejection(player, serverName, reason.get());
                 return; // 明确拒绝：不再重试（重试必然得到同样的踢出，只会在目标服多刷登录记录）

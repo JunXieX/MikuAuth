@@ -210,7 +210,7 @@ class AuthManagerDecisionTest {
         repository.session = Optional.of(new DatabaseManager.Session("1.2.3.4", Long.MAX_VALUE));
 
         authManager.decideLoginModeAsync("alice", "1.2.3.4").join();
-        authManager.handleConnected(playerFor("alice"));
+        authManager.handleConnected(playerFor("alice"), null);
 
         assertNotNull(repository.lastSavedSessionExpiry,
                 "开启 renew-on-session-login 时，免密进入应顺延会话");
@@ -227,7 +227,7 @@ class AuthManagerDecisionTest {
         repository.session = Optional.of(new DatabaseManager.Session("1.2.3.4", Long.MAX_VALUE));
 
         authManager.decideLoginModeAsync("alice", "1.2.3.4").join();
-        authManager.handleConnected(playerFor("alice"));
+        authManager.handleConnected(playerFor("alice"), null);
 
         assertNull(repository.lastSavedSessionExpiry,
                 "关闭续期时会话应保持「从上次密码登录起硬性到期」的语义");
@@ -239,7 +239,7 @@ class AuthManagerDecisionTest {
         repository.session = Optional.of(new DatabaseManager.Session("1.2.3.4", Long.MAX_VALUE));
 
         authManager.decideLoginModeAsync("alice", "1.2.3.4").join();
-        authManager.handleConnected(playerFor("alice"));
+        authManager.handleConnected(playerFor("alice"), null);
 
         assertFalse(authManager.isSessionVerifiedFor("alice", "1.2.3.4"), "标记用后即删，避免影响后续连接");
     }
@@ -384,7 +384,7 @@ class AuthManagerDecisionTest {
         Player player = playerFor("alice");
         // 会话免密进入：该连接随即处于"已认证"状态，满足 /changepassword 的前置条件
         authManager.decideLoginModeAsync("alice", "1.2.3.4").join();
-        authManager.handleConnected(player);
+        authManager.handleConnected(player, null);
         assertTrue(authManager.isAllowed(player), "会话免密进入后应处于已认证状态");
 
         authManager.handleChangePasswordCommand(player, "pantof", "brandNewPass1", "brandNewPass1");
@@ -541,7 +541,7 @@ class AuthManagerDecisionTest {
 
         Player player = playerFor("alice");
         authManager.decideLoginModeAsync("alice", "1.2.3.4").join();
-        authManager.handleConnected(player);                 // 会话免密直连目标服：完成认证
+        authManager.handleConnected(player, null);                 // 会话免密直连目标服：完成认证
         assertTrue(authManager.isAllowed(player), "前提：玩家已通过认证");
 
         // 后端关服 → 玩家被弹回认证服（同一连接内切服到 limbo）
@@ -577,7 +577,7 @@ class AuthManagerDecisionTest {
 
         Player player = playerFor("alice");
         authManager.decideLoginModeAsync("alice", "1.2.3.4").join();
-        authManager.handleConnected(player);                 // 会话免密直连目标服：完成认证
+        authManager.handleConnected(player, null);                 // 会话免密直连目标服：完成认证
         assertTrue(authManager.isAllowed(player), "前提：玩家已通过认证");
 
         // 仍在正式服时的连接事件：不重复调度（避免无谓的连接尝试）
@@ -608,7 +608,7 @@ class AuthManagerDecisionTest {
 
         Player player = playerFor("alice");
         authManager.decideLoginModeAsync("alice", "1.2.3.4").join();
-        authManager.handleConnected(player);
+        authManager.handleConnected(player, null);
         assertTrue(authManager.isAllowed(player), "前提：玩家已通过认证");
 
         placeOnServer(player, "limbo");
@@ -875,6 +875,8 @@ class AuthManagerDecisionTest {
         private volatile String writtenPasswordHash;
         /** 是否调用过 clearSession（改密/重置密码后应让旧会话立即失效）。 */
         private volatile boolean sessionCleared;
+        /** 是否存在可被"认领"的无密码记录（注册撞唯一约束后的收尾路径）。 */
+        private volatile boolean claimable;
         /**
          * 挂起的 findPlayer 结果（非 null 时优先返回它并随即清空）。
          *
@@ -946,6 +948,15 @@ class AuthManagerDecisionTest {
         @Override
         public CompletableFuture<Boolean> releaseStaleAccount(String nickname, UUID expectedUuid) {
             return CompletableFuture.completedFuture(false);
+        }
+
+        @Override
+        public CompletableFuture<Boolean> claimPasswordless(String nickname, String passwordHash, String ip) {
+            if (!claimable) {
+                return CompletableFuture.completedFuture(false);
+            }
+            writtenPasswordHash = passwordHash;
+            return CompletableFuture.completedFuture(true);
         }
 
         @Override

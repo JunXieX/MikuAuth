@@ -291,7 +291,7 @@ public final class AuthManager {
         // 1) 基岩版昵称检测（Floodgate 在加密握手阶段已注册玩家）
         if (config.bedrockAutoLogin()
                 && BedrockDetector.isBedrockUsername(username, sink)) {
-            recordBedrockDecision(username);
+            recordLoginMode(username, LoginMode.BEDROCK);
             return CompletableFuture.completedFuture(ModeDecision.of(LoginMode.BEDROCK));
         }
 
@@ -376,17 +376,6 @@ public final class AuthManager {
                 new ModeRecord(mode, System.currentTimeMillis()));
     }
 
-    /**
-     * 记录基岩版决策。
-     *
-     * <p>不再衍生"带前缀/无前缀"的多种昵称形态：基岩身份完全由 Floodgate 在线注册表
-     * 按 UUID 判定（见 {@link BedrockDetector#isBedrockPlayer}），调度侧也改为查 UUID，
-     * 昵称形态不再参与任何判定。
-     */
-    private void recordBedrockDecision(String username) {
-        recordLoginMode(username, LoginMode.BEDROCK);
-    }
-
     /** 读取昵称最近一次 PreLogin 决策（初始调度用）；无记录返回 null。 */
     public LoginMode lastLoginModeFor(String username) {
         ModeRecord record = lastLoginModes.get(MikuConfig.normalize(username));
@@ -458,9 +447,6 @@ public final class AuthManager {
             case CANCELLED_BY_USER, CANCELLED_BY_USER_BEFORE_COMPLETE ->
                     logger.info("[进服诊断] {} 中断了登录（{}），通常为玩家主动关闭客户端或网络中断。",
                             username, describeStatus(status));
-            default -> {
-                // SUCCESSFUL_LOGIN 已在开头返回，无其他状态
-            }
         }
     }
 
@@ -753,10 +739,6 @@ public final class AuthManager {
      * 进入 limbo 完成注册/登录；正版、基岩与会话免密玩家由 PreLogin 决策直接调度到
      * 目标服（免密，无需认证），在本方法中完成登记与提示。
      */
-    public void handleConnected(Player player) {
-        handleConnected(player, null);
-    }
-
     /**
      * 玩家连接后的入口，带"刚连上哪台服务器"。
      *
@@ -832,13 +814,11 @@ public final class AuthManager {
                 && premium.isVerified(player.getUniqueId())) {
             logger.debug("[认证] {} 正版免密通过", player.getUsername());
             completeAuth(player, session, "auth.auto.premium", false);
-            // 正版玩家自动登记（无密码），下次 PreLogin 可直接 forceOnlineMode
-            withFallback(database.findPlayer(player.getUsername()).thenAccept(existing -> {
-                if (existing.isEmpty()) {
-                    database.register(player.getUniqueId(), player.getUsername(), null,
-                            StoredPlayer.TYPE_PREMIUM, ip);
-                }
-            }), null, "正版玩家自动登记");
+            // 正版玩家自动登记（无密码），下次 PreLogin 可直接 forceOnlineMode。
+            // 直接 INSERT 而不是"先查再插"：已存在时唯一约束返回 DUPLICATE，结果无差别，
+            // 但每次正版登录少一次查询往返
+            withFallback(database.register(player.getUniqueId(), player.getUsername(), null,
+                    StoredPlayer.TYPE_PREMIUM, ip), null, "正版玩家自动登记");
             return;
         }
         // 3) 基岩免密：Floodgate 已完成身份验证
@@ -891,11 +871,29 @@ public final class AuthManager {
         AuthSession session = new AuthSession(player.getUsername(), ip);
         session.phase = Phase.CONFIG;
         sessions.put(player.getUniqueId(), session);
-        withFallback(database.findPlayer(player.getUsername()).thenAccept(existing -> {
-            StoredPlayer stored = existing.orElse(null);
-            session.textKey = (stored == null || !stored.hasPassword()) ? "register" : "login";
-            showConfigDialog(player, session, null);
-        }), null, "配置阶段流程启动");
+        database.findPlayer(player.getUsername())
+                .thenAccept(existing -> {
+                    // 同一连接可能被重复触发（闸门重放、ensureSession 自愈重建）：
+                    // 这次查询回来时若已被新流程取代，就什么都不能做 —— 拿旧会话发对话框
+                    // 会把已进入 play 的玩家按配置阶段的包打断连接
+                    if (sessions.get(player.getUniqueId()) != session) {
+                        return;
+                    }
+                    StoredPlayer stored = existing.orElse(null);
+                    session.textKey = (stored == null || !stored.hasPassword()) ? "register" : "login";
+                    showConfigDialog(player, session, null);
+                })
+                .exceptionally(throwable -> {
+                    // 查库失败时不能把连接留在闸门里空等超时：那会让玩家盯着"加载地形"
+                    // 等满 login.pre.timeout-seconds，最后看到的还是"认证超时"这种误导原因。
+                    // 同样只在本次会话仍是当前会话时收尾，避免把已认证的连接踢下线
+                    logger.error("[认证] {} 的配置阶段流程启动失败: {}",
+                            player.getUsername(), throwable.toString());
+                    if (sessions.get(player.getUniqueId()) == session) {
+                        kick(player, "kick.auth-error");
+                    }
+                    return null;
+                });
     }
 
     /**
@@ -921,7 +919,9 @@ public final class AuthManager {
         logger.debug("[认证] {} 无法使用配置阶段对话框（{}），降级为 play 阶段流程",
                 player.getUsername(), error);
         sessions.remove(player.getUniqueId(), session);
-        preAuthGate.release(player);
+        // 这里不是"认证成功放行"，不能用 release：那会把连接标成"刚放行"，
+        // 之后玩家真正完成认证并转服时会再补发一次成功提示
+        preAuthGate.downgrade(player);
     }
 
     /**
@@ -1189,7 +1189,7 @@ public final class AuthManager {
         // 导致玩家永远无法重新进入注册/登录流程
         authenticatedConnections.remove(player.getUniqueId(), player);
         premium.revokeVerified(player.getUniqueId());
-        handleConnected(player);
+        handleConnected(player, null);
         return sessions.get(player.getUniqueId());
     }
 
@@ -1396,14 +1396,9 @@ public final class AuthManager {
                             .thenAccept(result -> {
                                 if (result == DatabaseManager.RegisterResult.OK) {
                                     completeAuth(player, session, "auth.success.register", true);
-                                } else if (result == DatabaseManager.RegisterResult.DUPLICATE) {
-                                    failRegister(player, session, "error.already-registered", Map.of());
-                                } else if (result == DatabaseManager.RegisterResult.IP_LIMIT) {
-                                    // 拒绝原因是安全事件（同 IP 批量注册），必须落审计便于事后追溯
-                                    audit.record(AuditAction.REJECT_IP_LIMIT, session.username,
-                                            player.getUniqueId(), session.ip,
-                                            "该 IP 名下的离线账号数已达上限 " + maxAccounts);
-                                    failRegister(player, session, "error.ip-limit", Map.of());
+                                } else if (result == DatabaseManager.RegisterResult.DUPLICATE
+                                        || result == DatabaseManager.RegisterResult.IP_LIMIT) {
+                                    claimOrFail(player, session, hash, result);
                                 } else {
                                     // 真正的数据库故障不能伪装成"昵称已被注册"
                                     failRegister(player, session, "error.server-busy", Map.of());
@@ -1426,6 +1421,35 @@ public final class AuthManager {
             logger.warn("[注册] 密码哈希队列已满，拒绝 {} 的请求", player.getUsername());
             display.chatAlways(player, "error.server-busy", Map.of());
         }
+    }
+
+    /**
+     * 注册撞到唯一约束时的收尾：占用该昵称的若是一条<b>没有密码</b>的离线记录
+     * （正版玩家首次进入时自动登记、或 {@code deletepassword} 之后残留），
+     * 就把密码补上去完成注册。
+     *
+     * <p>不做这一步，这类昵称会陷入死循环：流程判定"该去注册"，而注册永远返回
+     * "昵称已被注册"——玩家既登不进去也注册不了。
+     */
+    private void claimOrFail(Player player, AuthSession session, String passwordHash,
+                             DatabaseManager.RegisterResult rejected) {
+        withFallback(database.claimPasswordless(session.username, passwordHash, session.ip),
+                Boolean.FALSE, "认领无密码账号").thenAccept(claimed -> {
+                    if (Boolean.TRUE.equals(claimed)) {
+                        logger.info("[注册] {} 的账号此前没有密码，已补全密码完成注册", session.username);
+                        completeAuth(player, session, "auth.success.register", true);
+                        return;
+                    }
+                    if (rejected == DatabaseManager.RegisterResult.IP_LIMIT) {
+                        // 拒绝原因是安全事件（同 IP 批量注册），必须落审计便于事后追溯
+                        audit.record(AuditAction.REJECT_IP_LIMIT, session.username,
+                                player.getUniqueId(), session.ip,
+                                "该 IP 名下的离线账号数已达上限 " + config.maxAccountsPerIp());
+                        failRegister(player, session, "error.ip-limit", Map.of());
+                        return;
+                    }
+                    failRegister(player, session, "error.already-registered", Map.of());
+                });
     }
 
     // ---------------------------------------------------------------------
@@ -1553,7 +1577,7 @@ public final class AuthManager {
                             display.chatAlways(player, "changepassword.no-password", Map.of());
                             return;
                         }
-                        throttle.reset(ip, username);
+                        throttle.resetAccount(username);
                         display.chatAlways(player, "changepassword.success", Map.of());
                         logger.info("[改密] {} 已修改密码，其同 IP 会话免密记录已清除", username);
                         audit.record(AuditAction.CHANGE_PASSWORD, username, player.getUniqueId(), ip,
@@ -1756,7 +1780,7 @@ public final class AuthManager {
         if (passwordVerified) {
             // 密码认证成功：清空该账号的失败计数（IP 维度保留——否则攻击者用自己
             // 一个有效账号登录一次，就能把该 IP 的换昵称撞库计数一并清零）
-            throttle.reset(session.ip, player.getUsername());
+            throttle.resetAccount(player.getUsername());
         }
         // 会话续期 + 最近登录记录合并为一次数据库任务：
         // 分成两次会让每次登录多占用一次队列任务与连接借用（SQLite 只有 1 个工作线程）
@@ -1798,7 +1822,7 @@ public final class AuthManager {
         audit.record(auditActionFor(messageKey), player.getUsername(), player.getUniqueId(),
                 session.ip, auditDetailFor(messageKey) + "（配置阶段）");
         if (passwordVerified) {
-            throttle.reset(session.ip, player.getUsername());
+            throttle.resetAccount(player.getUsername());
         }
         long expiresAt = passwordVerified && config.sessionEnabled()
                 ? System.currentTimeMillis() + config.sessionDurationMinutes() * 60_000L
@@ -1966,11 +1990,6 @@ public final class AuthManager {
     /**
      * 对话框关闭回调（由 /mikuauth-close 命令触发，或对话框未能锁定输入时
      * 收到的防御性聊天包触发）：解除静默并给出聊天栏用法提示。
-     *
-     * <p>{@code config.dialogEnabled()} 判断是纯防御：{@code dialogOpen} 只会在
-     * {@code DialogService} 发送成功时置位，而那时开关必然是开着的；加上这一层是为了
-     * "开关关闭后残留的 dialogOpen 标记"这类不可能状态也能被安全兜住——它一旦残留，
-     * 后续所有聊天提示都会被静默规则丢弃。
      */
     public void handleClientActivity(Player player) {
         AuthSession session = sessions.get(player.getUniqueId());
@@ -1979,9 +1998,6 @@ public final class AuthManager {
         }
         session.dialogOpen = false;
         display.exitSilent(player);
-        if (!config.dialogEnabled()) {
-            return;
-        }
         display.chat(player, session.textKey + ".chat-usage", Map.of());
     }
 
@@ -2066,7 +2082,9 @@ public final class AuthManager {
                 }
                 Player player = server.getPlayer(entry.getKey()).orElse(null);
                 if (player == null) {
-                    sessions.remove(entry.getKey());
+                    // 断线事件没跑到（代理侧异常路径）时的心跳兜底：连同显示跟踪、
+                    // 转服挂起、闸门一起清，避免只删会话留下一堆引用
+                    cleanup(entry.getKey());
                     continue;
                 }
                 if (timeout > 0 && now - session.connectedAt > timeout * 1000L) {

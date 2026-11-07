@@ -57,6 +57,16 @@ class UuidUtilTest {
     }
 
     @Test
+    void parseAcceptsCompactFormWithoutDashes() {
+        // Mojang 官方接口与 AuthMe 的 premium_uuid 都是 32 位紧凑写法，
+        // 认不出来会让老库升级/账号迁移把正版账号静默降级成离线账号
+        UUID uuid = UUID.fromString("853c80ef-3c37-49fd-aa49-938b674adae6");
+        String compact = uuid.toString().replace("-", "");
+        assertEquals(uuid, UuidUtil.parse(compact));
+        assertEquals(uuid, UuidUtil.parse(compact.toUpperCase(java.util.Locale.ROOT)));
+    }
+
+    @Test
     void formatIsLowercaseStandardForm() {
         UUID uuid = UUID.fromString("123E4567-E89B-12D3-A456-426614174000");
         assertEquals("123e4567-e89b-12d3-a456-426614174000", UuidUtil.format(uuid));

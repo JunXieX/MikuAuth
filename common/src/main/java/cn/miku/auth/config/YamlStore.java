@@ -90,7 +90,13 @@ final class YamlStore {
         if (value == null) {
             value = rawFrom(current.defaults(), path);
         }
-        resolved.put(path, value == null ? ABSENT : value);
+        // 只有"读完仍然是当前快照"时才写缓存：reload 恰好发生在这次查找中间时，
+        // 计算依据是旧快照，写进去会让旧值一直命中到下一次 reload。
+        // 判等与 put 之间仍有纳秒级窗口，最坏结果也只是某条旧值残留到下次 reload ——
+        // 为此再引入"缓存值带代次"的复杂度不值。
+        if (snapshot == current) {
+            resolved.put(path, value == null ? ABSENT : value);
+        }
         return value;
     }
 

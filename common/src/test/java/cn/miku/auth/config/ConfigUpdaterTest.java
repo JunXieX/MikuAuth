@@ -198,54 +198,18 @@ class ConfigUpdaterTest {
     }
 
     // ---------------------------------------------------------------------
-    // 废弃键提示
-    //
-    // 当前 RETIRED_KEYS 为空：唯一一个曾经的废弃键 dialog.enabled 在 2.7.0 重新成为
-    // 真实开关（关闭后回到聊天栏登录），必须从表中移除——留着会让服主看到
-    // "本键不再生效"的注释，而它其实已经生效。
-    //
-    // 下面第一个用例因此改为断言"不再标注"；后两个用例仍对废弃键机制本身做巡检。
+    // 只增不改
     // ---------------------------------------------------------------------
 
     @Test
-    void reactivatedDialogEnabledIsNoLongerMarkedRetired() throws Exception {
-        // 老配置（2.1.2 样本）里就带着 dialog.enabled: true。该键现在重新生效，
-        // 因此既不能被标注废弃，也不该被模板补一份（用户已经有这个键了）
+    void userValuesArePreservedForExistingKeys() throws Exception {
+        // 老配置（2.1.2 样本）里带着 dialog.enabled: true，而模板里该键的默认值已经变过：
+        // 用户已有的键一律跳过，既不补一份、也不改写用户写的值
         Path file = writeLegacyConfig();
         ConfigUpdater.merge(file, DEFAULT_CONFIG, null);
-        String text = Files.readString(file, StandardCharsets.UTF_8);
 
-        assertFalse(text.contains("已废弃："),
-                "dialog.enabled 已重新生效，不得再插入'已废弃'注释");
-        // 键本身必须原样保留，且注释不影响解析
         Map<String, Object> dialog = section(parse(file), "dialog");
         assertEquals(Boolean.TRUE, dialog.get("enabled"));
-    }
-
-    @Test
-    void retiredKeyNoticeIsNotAddedWhenKeyStaysInSync() throws Exception {
-        // 覆盖废弃键机制的巡检用例：用户配置已是最新版（没有需要补充的段落），
-        // 且不含任何废弃键时，合并必须报告"无改动"且不写提示。
-        // 注意：这里刻意不再往模板里塞 dialog.enabled —— 它现在是合法键，
-        // 塞进去只会命中"用户已有该键、跳过"这条正常分支，测不出废弃键逻辑。
-        Path file = tempDir.resolve("config.yml");
-        Files.writeString(file, resource(DEFAULT_CONFIG).replace("\r\n", "\n"),
-                StandardCharsets.UTF_8);
-
-        ConfigUpdater.Result result = ConfigUpdater.merge(file, DEFAULT_CONFIG, null);
-
-        assertFalse(result.changed(), "配置已是最新版时不应有任何改动");
-        assertFalse(Files.readString(file, StandardCharsets.UTF_8).contains("已废弃："));
-    }
-
-    @Test
-    void retiredKeyNoticeIsNotAddedForFreshConfigs() throws Exception {
-        // 内置默认配置本身不含废弃键，因此全新安装不应产生任何提示
-        Path file = tempDir.resolve("config.yml");
-        Files.writeString(file, resource(DEFAULT_CONFIG).replace("\r\n", "\n"), StandardCharsets.UTF_8);
-
-        assertFalse(ConfigUpdater.merge(file, DEFAULT_CONFIG, null).changed());
-        assertFalse(Files.readString(file, StandardCharsets.UTF_8).contains("已废弃："));
     }
 
     // ---------------------------------------------------------------------

@@ -42,5 +42,31 @@ public enum AuditAction {
      * <p>只在"降级运行读到新版本写入的 action"时出现：展开展示为"未知事件"，
      * 而不是伪装成"管理员操作"（那会把排障方向带偏）。
      */
-    UNKNOWN
+    UNKNOWN;
+
+    /**
+     * 展示用中文名（管理命令的审计列表）。
+     *
+     * <p>放在枚举里而不是各平台命令里：两端读的是同一张表、同一份文案，
+     * 新增事件类型时编译器会强制在这里补齐。
+     */
+    public String displayName() {
+        return switch (this) {
+            case LOGIN_SUCCESS -> "密码登录";
+            case LOGIN_PREMIUM -> "正版免密";
+            case LOGIN_BEDROCK -> "基岩免密";
+            case LOGIN_SESSION -> "会话免密";
+            case LOGIN_FAIL -> "密码错误";
+            case REGISTER -> "注册";
+            case CHANGE_PASSWORD -> "改密";
+            case KICK_TIMEOUT -> "超时踢出";
+            case REJECT_PREMIUM_FAILED -> "正版验证失败";
+            case REJECT_NAME_SNIPE -> "昵称抢注";
+            case REJECT_IP_LIMIT -> "IP 超限";
+            case ADMIN_ACTION -> "管理员操作";
+            case MIGRATE -> "账号迁移";
+            case STALE_ACCOUNT_RELEASED -> "死昵称清理";
+            case UNKNOWN -> "未知事件";
+        };
+    }
 }

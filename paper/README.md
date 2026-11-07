@@ -46,12 +46,12 @@ Paper 服务端的登录验证插件：玩家停在服务端的**配置阶段**�
 | --- | --- |
 | database | `type`（sqlite / mariadb / mysql）、`file`（SQLite 文件名，默认 `database.db`）与连接参数 |
 | registration | 密码长度、每 IP 账号上限 |
-| login | 单次连接尝试次数、配置阶段等待上限（`timeout-seconds`）、BCrypt 成本 |
+| login | 单次连接尝试次数、BCrypt 成本；配置阶段等待上限取 `pre.timeout-seconds`（0 则沿用 `timeout-seconds`） |
 | security | 跨连接失败计数与临时封禁 |
 | dialog | 是否允许 Esc 关闭对话框（`allow-close-with-escape`，默认 `false`） |
 | audit | 审计开关与保留天数 |
 
-`login.timeout-seconds` 必须小于服务端自身对配置阶段的超时，否则玩家看到的是服务端的超时断开。
+`login.pre.timeout-seconds`（默认 30 秒）必须小于服务端自身对配置阶段的超时，否则玩家看到的是服务端的超时断开。
 
 > **数据库文件名**：3.9.0 起统一由 `database.file` 决定（默认 `database.db`，与代理端一致）。
 > 从 3.8.x 升级时，`plugins/MikuAuth/auth.db` 会在首次启动时自动改名为 `database.db`

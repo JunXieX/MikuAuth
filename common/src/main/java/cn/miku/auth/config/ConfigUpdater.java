@@ -42,10 +42,6 @@ import cn.miku.auth.util.LogSink;
  *   <li>首次修改前留一份 {@code <文件名>.bak}；</li>
  *   <li>整个过程幂等：第二次启动不会重复插入。</li>
  * </ul>
- *
- * <p><b>废弃键的标注</b>：本类只补键、不删键，因此老配置里已经存在的废弃键只能靠
- * {@link #RETIRED_KEYS} 就地插入一行注释来标注，否则它会"看起来仍然生效"。
- * 反过来，某个键一旦重新生效（例如 {@code dialog.enabled}），就必须从该表中移除。
  */
 final class ConfigUpdater {
 
@@ -55,25 +51,6 @@ final class ConfigUpdater {
     /** 追加在文件末尾的提示注释（幂等标记）。 */
     private static final String MARKER =
             "# ==== 以下段落为 MikuAuth 新增配置项（自动补充，内容与内置默认一致）====";
-
-    /** 废弃键提示的固定前缀（同时用作幂等标记）。 */
-    private static final String RETIRED_MARKER = "# \u26a0 已废弃：";
-
-    /**
-     * 已废弃的配置键：路径 → 废弃说明。
-     *
-     * <p>合并只增不改，因此老配置里已经存在的废弃键会永久留在服主文件中。
-     * 危险之处在于：它<b>看起来仍然生效</b>——例如 2.1.0 的某个键被移除后，
-     * 服主仍会以为自己的设置起作用。
-     *
-     * <p>处理方式：在该键<b>上一行</b>插入一条说明注释（纯插入，不改动、不删除用户写的行），
-     * 让服主打开文件就能看到"这行已经没用了"。说明文本里的 {@code ⚠} 同时充当幂等标记。
-     *
-     * <p><b>键恢复生效时必须从这里删除</b>：{@code dialog.enabled} 曾在 2.2.0 被标记废弃
-     * （当时对话框恒开），2.7.0 起它重新成为一个真实开关——留在表里会让服主看到
-     * "本键不再生效"的注释，而实际上它已经生效，属于最坏的一类文档错误。
-     */
-    private static final Map<String, String> RETIRED_KEYS = Map.of();
 
     /** 合并结果。 */
     record Result(List<String> added, boolean changed) {
@@ -165,7 +142,7 @@ final class ConfigUpdater {
             topLevelAt.merge(index, parent.isEmpty(), (a, b) -> a || b);
             added.add(entry.path());
         }
-        if (grouped.isEmpty() && !hasRetiredKeys(userLines)) {
+        if (grouped.isEmpty()) {
             return Result.NONE;
         }
 
@@ -186,13 +163,6 @@ final class ConfigUpdater {
             userLines.addAll(Math.min(index, userLines.size()), block);
         }
 
-        // 废弃键提示必须放在上面这批插入之后：它们按"原始行号"倒序插入，
-        // 若先插注释会让这些行号全部偏移。这里同样是纯插入，不动用户写的任何一行。
-        List<String> retiredNoted = applyRetiredNotices(userLines);
-        if (grouped.isEmpty() && retiredNoted.isEmpty()) {
-            return Result.NONE;
-        }
-
         String merged = String.join(eol, userLines);
         // 安全闸门：合并结果必须可解析、且新增的每个键都真的能被读到
         Map<String, Object> parsed = tryParse(merged);
@@ -208,8 +178,9 @@ final class ConfigUpdater {
         // （实测：用户写 "enabled": false，合并后被默认值 true 覆盖）。
         if (hasDuplicateKeys(merged)) {
             if (logger != null) {
-                logger.warn("[配置] {} 的增量合并会产生重复键（会让默认值覆盖你的设置），已放弃写入。"
-                        + "请检查该文件是否使用了带引号的键名（如 \"key\":）或非标准缩进",
+                logger.warn("[配置] {} 的增量合并会产生重复键（同一个键写了两遍，后者会覆盖前者），"
+                        + "已放弃写入。常见原因：文件里本来就有重复键（旧版本模板遗留），"
+                        + "或使用了带引号的键名（如 \"key\":）；对照内置模板删掉重复的那一行即可",
                         file.getFileName());
             }
             return Result.NONE;
@@ -220,15 +191,9 @@ final class ConfigUpdater {
         Path backup = file.resolveSibling(file.getFileName() + ".bak");
         Files.copy(file, backup, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
         writeAtomically(file, merged);
-        if (logger != null) {
-            if (!added.isEmpty()) {
-                logger.info("[配置] {} 已补充新增配置项: {}（改写前的备份：{}）",
-                        file.getFileName(), String.join(", ", added), backup.getFileName());
-            }
-            if (!retiredNoted.isEmpty()) {
-                logger.warn("[配置] {} 含已废弃的配置项 {}，已在文件中标注——这些键不再生效，可安全删除",
-                        file.getFileName(), String.join(", ", retiredNoted));
-            }
+        if (logger != null && !added.isEmpty()) {
+            logger.info("[配置] {} 已补充新增配置项: {}（改写前的备份：{}）",
+                    file.getFileName(), String.join(", ", added), backup.getFileName());
         }
         return new Result(added, true);
     }
@@ -261,43 +226,6 @@ final class ConfigUpdater {
             }
             throw e;
         }
-    }
-
-    // ---------------------------------------------------------------------
-    // 废弃键提示
-    // ---------------------------------------------------------------------
-
-    /** 用户文件中是否存在已废弃的键（用于决定"无新增项时是否还要写文件"）。 */
-    private static boolean hasRetiredKeys(List<String> lines) {
-        for (String path : RETIRED_KEYS.keySet()) {
-            if (locateKey(lines, path)[0] >= 0) {
-                return true;
-            }
-        }
-        return false;
-    }
-
-    /**
-     * 为每个废弃键插入一行说明注释（幂等）。
-     *
-     * @return 本次实际插入提示的键路径；已提示过的不计入
-     */
-    private static List<String> applyRetiredNotices(List<String> lines) {
-        List<String> noted = new ArrayList<>();
-        for (Map.Entry<String, String> retired : RETIRED_KEYS.entrySet()) {
-            int[] located = locateKey(lines, retired.getKey());
-            int index = located[0];
-            if (index < 0) {
-                continue;                                   // 用户文件里没有这个键
-            }
-            if (index > 0 && lines.get(index - 1).contains(RETIRED_MARKER)) {
-                continue;                                   // 已提示过，保持幂等
-            }
-            // 注释按该键的缩进对齐，保证插入后段落排版不错乱
-            lines.add(index, " ".repeat(located[1]) + RETIRED_MARKER + retired.getValue());
-            noted.add(retired.getKey());
-        }
-        return noted;
     }
 
     /**

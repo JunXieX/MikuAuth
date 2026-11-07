@@ -8,6 +8,7 @@ import java.nio.file.Path;
 import java.sql.SQLException;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -41,9 +42,14 @@ class MariaDbBackendDialectTest {
         assertEquals("jdbc:mysql://db.local:3306/mikuauth?sslMode=REQUIRED"
                         + "&connectTimeout=5000&socketTimeout=30000",
                 settings("mysql", "trust").jdbcUrl());
+        // 明文通道必须放开公钥索取：MySQL 8 的 caching_sha2_password 首连要拿服务端公钥，
+        // 否则驱动直接拒绝建连；开了 TLS 就不需要该参数（通道本身完成密钥交换）
+        String disabled = settings("mysql", "disable").jdbcUrl();
         assertEquals("jdbc:mysql://db.local:3306/mikuauth?sslMode=DISABLED"
-                        + "&connectTimeout=5000&socketTimeout=30000",
-                settings("mysql", "disable").jdbcUrl());
+                        + "&connectTimeout=5000&socketTimeout=30000&allowPublicKeyRetrieval=true",
+                disabled);
+        assertFalse(settings("mysql", "trust").jdbcUrl().contains("allowPublicKeyRetrieval"),
+                "启用 TLS 时不应追加 allowPublicKeyRetrieval");
     }
 
     @Test

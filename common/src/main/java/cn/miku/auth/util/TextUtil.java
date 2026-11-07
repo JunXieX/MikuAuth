@@ -29,6 +29,19 @@ public final class TextUtil {
     private static final Pattern LEGACY = Pattern.compile("&[0-9a-fk-orA-FK-OR]");
     /** 十六进制色：&amp;#RRGGBB */
     private static final Pattern HEX = Pattern.compile("&#([0-9a-fA-F]{6})");
+    /** 传统颜色代码 → MiniMessage 标签。 */
+    private static final Map<Character, String> LEGACY_TAGS = Map.ofEntries(
+            Map.entry('0', "<black>"), Map.entry('1', "<dark_blue>"),
+            Map.entry('2', "<dark_green>"), Map.entry('3', "<dark_aqua>"),
+            Map.entry('4', "<dark_red>"), Map.entry('5', "<dark_purple>"),
+            Map.entry('6', "<gold>"), Map.entry('7', "<gray>"),
+            Map.entry('8', "<dark_gray>"), Map.entry('9', "<blue>"),
+            Map.entry('a', "<green>"), Map.entry('b', "<aqua>"),
+            Map.entry('c', "<red>"), Map.entry('d', "<light_purple>"),
+            Map.entry('e', "<yellow>"), Map.entry('f', "<white>"),
+            Map.entry('k', "<obfuscated>"), Map.entry('l', "<bold>"),
+            Map.entry('m', "<strikethrough>"), Map.entry('n', "<underlined>"),
+            Map.entry('o', "<italic>"), Map.entry('r', "<reset>"));
     /** 静态文本渲染缓存上限（超出即整体清空，缓存只是性能优化）。 */
     private static final int MAX_CACHE_SIZE = 1024;
     private static final Map<String, Component> STATIC_CACHE = new ConcurrentHashMap<>();
@@ -113,22 +126,10 @@ public final class TextUtil {
         // 先处理十六进制色：&#RRGGBB -> <#RRGGBB>
         String text = HEX.matcher(input).replaceAll("<#$1>");
         StringBuilder builder = new StringBuilder(text.length());
-        Map<Character, String> tags = Map.ofEntries(
-                Map.entry('0', "<black>"), Map.entry('1', "<dark_blue>"),
-                Map.entry('2', "<dark_green>"), Map.entry('3', "<dark_aqua>"),
-                Map.entry('4', "<dark_red>"), Map.entry('5', "<dark_purple>"),
-                Map.entry('6', "<gold>"), Map.entry('7', "<gray>"),
-                Map.entry('8', "<dark_gray>"), Map.entry('9', "<blue>"),
-                Map.entry('a', "<green>"), Map.entry('b', "<aqua>"),
-                Map.entry('c', "<red>"), Map.entry('d', "<light_purple>"),
-                Map.entry('e', "<yellow>"), Map.entry('f', "<white>"),
-                Map.entry('k', "<obfuscated>"), Map.entry('l', "<bold>"),
-                Map.entry('m', "<strikethrough>"), Map.entry('n', "<underlined>"),
-                Map.entry('o', "<italic>"), Map.entry('r', "<reset>"));
         for (int i = 0; i < text.length(); i++) {
             char current = text.charAt(i);
             if (current == '&' && i + 1 < text.length()) {
-                String tag = tags.get(Character.toLowerCase(text.charAt(i + 1)));
+                String tag = LEGACY_TAGS.get(Character.toLowerCase(text.charAt(i + 1)));
                 if (tag != null) {
                     builder.append(tag);
                     i++;

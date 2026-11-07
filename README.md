@@ -88,7 +88,7 @@ MikuMC 系列插件交流群：1105054380
 | `/mikuauth limit <数量> --confirm` | 临时调整每 IP 账号上限 | 写 + 确认 |
 | `/mikuauth passwd <玩家> --confirm` | 交互式重置密码（密码在聊天栏输入，不会留在命令历史） | 写 + 确认 |
 | `/mikuauth setpassword <玩家> <新密码> --confirm` | 直接设置密码（保留账号） | 写 + 确认 |
-| `/mikuauth deletepassword <玩家> --confirm` | 删除密码（账号回到未注册状态，昵称可被重新注册） | 写 + 确认 |
+| `/mikuauth deletepassword <玩家> --confirm` | 删除密码（账号回到未注册状态，昵称可被重新注册；正版登记一并解除） | 写 + 确认 |
 | `/mikuauth unbind <玩家> --confirm` | 解除正版绑定 | 写 + 确认 |
 | `/mikuauth migrate <来源> <位置> [--dry-run]` | 迁移账号（来源：`authme` / `librelogin` / `limboauth`）；`--dry-run` 只统计、不写库 | 写（`--dry-run` 时无需确认） |
 

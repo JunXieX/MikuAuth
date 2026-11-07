@@ -89,7 +89,7 @@ class LoginThrottleTest {
     void successfulLoginResetsAccountCounterButKeepsIpCounter() {
         throttle.recordFailure(IP_A, "Alice");
         throttle.recordFailure(IP_A, "Alice");
-        throttle.reset(IP_A, "Alice");
+        throttle.resetAccount("Alice");
 
         // 账号维度已清零：换一个 IP 用同一昵称，重新从 0 开始计数（第 3 次才触发封禁）
         assertNull(throttle.recordFailure(IP_B, "Alice"));

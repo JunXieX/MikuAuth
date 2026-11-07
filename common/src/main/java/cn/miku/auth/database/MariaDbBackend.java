@@ -59,10 +59,17 @@ final class MariaDbBackend implements SqlBackend {
          */
         String jdbcUrl() {
             String ssl = "mysql".equals(type) ? mysqlSslMode() : sslMode;
-            return jdbcPrefix() + host + ":" + port + "/" + database
+            String url = jdbcPrefix() + host + ":" + port + "/" + database
                     + "?sslMode=" + ssl
                     + "&connectTimeout=" + connectionTimeoutMillis
                     + "&socketTimeout=30000";
+            // MySQL 8 的默认认证插件是 caching_sha2_password：明文通道首次认证必须向服务端
+            // 索取 RSA 公钥，而 Connector/J 默认禁止（allowPublicKeyRetrieval=false），
+            // 于是"type: mysql + 默认 ssl-mode: disable + MySQL 8 账号"建连必失败。
+            // 只在本来就没有加密通道（DISABLED）时放开；开了 TLS 由通道本身完成密钥交换。
+            return "mysql".equals(type) && "DISABLED".equals(ssl)
+                    ? url + "&allowPublicKeyRetrieval=true"
+                    : url;
         }
 
         private String mysqlSslMode() {
@@ -221,8 +228,8 @@ final class MariaDbBackend implements SqlBackend {
         return """
                 CREATE TABLE IF NOT EXISTS %s (
                     uuid            CHAR(36)     NOT NULL,
-                    nickname_lower  VARCHAR(16)  NOT NULL,
-                    display_name    VARCHAR(16)  NOT NULL,
+                    nickname_lower  VARCHAR(32)  NOT NULL,
+                    display_name    VARCHAR(32)  NOT NULL,
                     password_hash   VARCHAR(255) NULL,
                     auth_type       VARCHAR(16)  NOT NULL,
                     register_ip     VARCHAR(45)  NULL,
@@ -264,7 +271,7 @@ final class MariaDbBackend implements SqlBackend {
                 playersDdl("miku_players"),
                 """
                 CREATE TABLE IF NOT EXISTS miku_sessions (
-                    nickname_lower VARCHAR(16) NOT NULL,
+                    nickname_lower VARCHAR(32) NOT NULL,
                     ip             VARCHAR(45) NOT NULL,
                     expires_at     BIGINT      NOT NULL,
                     PRIMARY KEY (nickname_lower),
@@ -279,35 +286,76 @@ final class MariaDbBackend implements SqlBackend {
 
     /** password_hash 的目标宽度（AuthMe 的 {@code $SHA512$} 哈希约 153 字符）。 */
     private static final int PASSWORD_HASH_COLUMN_LENGTH = 255;
+    /**
+     * 昵称类列的目标宽度。
+     *
+     * <p>16 装不下 Floodgate 前缀名（默认前缀 {@code .} + 最长 16 字符 gamertag = 17）：
+     * 关掉 {@code bedrock.auto-login} 让基岩玩家走注册时，严格模式下 INSERT 直接报
+     * "Data too long"（玩家只看到"服务器繁忙"），审计写入也会整条丢失。
+     */
+    private static final int NICKNAME_COLUMN_LENGTH = 32;
+
+    /** 需要跟随 {@link #NICKNAME_COLUMN_LENGTH} 的列（表名, 列名）。 */
+    private static final String[][] NICKNAME_COLUMNS = {
+            {"miku_players", "nickname_lower"},
+            {"miku_players", "display_name"},
+            {"miku_sessions", "nickname_lower"},
+            {"miku_audit_log", "nickname"},
+            {"miku_audit_log", "nickname_lower"},
+    };
 
     /**
-     * 老库按需修复：把 {@code password_hash} 扩宽到能容纳 AuthMe 的 {@code $SHA512$} 哈希。
+     * 老库按需修复：把过窄的字符列扩到目标宽度（{@code password_hash} 与昵称类列）。
      *
      * <p>只在<b>确实更窄</b>时才返回 ALTER —— 先查 information_schema 拿当前宽度：
-     * 读不到（列不存在、或不是字符类型）就什么都不做，盲改会把 TEXT 之类的列截断成 255 字符。
+     * 读不到（列不存在、或不是字符类型）就跳过，盲改会把 TEXT 之类的列截断。
      * 健康库因此完全不产生 DDL，既不依赖 ALTER 权限，也没有每次启动重建表的开销。
      */
     @Override
     public List<String> repairStatements(Connection connection) throws SQLException {
-        String sql = "SELECT CHARACTER_MAXIMUM_LENGTH FROM information_schema.COLUMNS"
-                + " WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'miku_players'"
-                + " AND COLUMN_NAME = 'password_hash'";
-        try (Statement statement = connection.createStatement();
-             ResultSet rs = statement.executeQuery(sql)) {
-            if (!rs.next()) {
-                return List.of();
-            }
-            int currentLength = rs.getInt(1);
-            if (rs.wasNull() || currentLength >= PASSWORD_HASH_COLUMN_LENGTH) {
-                return List.of();
-            }
+        List<String> repairs = new java.util.ArrayList<>(2);
+        Integer hashLength = columnLength(connection, "miku_players", "password_hash");
+        if (hashLength != null && hashLength < PASSWORD_HASH_COLUMN_LENGTH) {
             if (logger != null) {
                 logger.warn("[数据库] password_hash 当前宽度 {} 低于 {}（AuthMe 的 $SHA512$ 哈希更长，"
                                 + "迁移写入会被静默截断），正在扩宽",
-                        currentLength, PASSWORD_HASH_COLUMN_LENGTH);
+                        hashLength, PASSWORD_HASH_COLUMN_LENGTH);
             }
-            return List.of("ALTER TABLE miku_players MODIFY COLUMN password_hash VARCHAR("
+            repairs.add("ALTER TABLE miku_players MODIFY COLUMN password_hash VARCHAR("
                     + PASSWORD_HASH_COLUMN_LENGTH + ") NULL");
+        }
+        for (String[] column : NICKNAME_COLUMNS) {
+            Integer length = columnLength(connection, column[0], column[1]);
+            if (length != null && length < NICKNAME_COLUMN_LENGTH) {
+                if (logger != null) {
+                    logger.warn("[数据库] {}.{} 当前宽度 {} 低于 {}（带前缀的基岩版昵称会写不进去），正在扩宽",
+                            column[0], column[1], length, NICKNAME_COLUMN_LENGTH);
+                }
+                repairs.add("ALTER TABLE " + column[0] + " MODIFY COLUMN " + column[1]
+                        + " VARCHAR(" + NICKNAME_COLUMN_LENGTH + ") NOT NULL");
+            }
+        }
+        return repairs;
+    }
+
+    /**
+     * 读某列的最大字符长度；列不存在或不是字符类型（读不到）时返回 null。
+     *
+     * <p>表名/列名走参数占位符，不拼接 SQL。
+     */
+    private static Integer columnLength(Connection connection, String table, String column) throws SQLException {
+        String sql = "SELECT CHARACTER_MAXIMUM_LENGTH FROM information_schema.COLUMNS"
+                + " WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND COLUMN_NAME = ?";
+        try (java.sql.PreparedStatement ps = connection.prepareStatement(sql)) {
+            ps.setString(1, table);
+            ps.setString(2, column);
+            try (ResultSet rs = ps.executeQuery()) {
+                if (!rs.next()) {
+                    return null;
+                }
+                int length = rs.getInt(1);
+                return rs.wasNull() ? null : length;
+            }
         }
     }
 
@@ -338,8 +386,8 @@ final class MariaDbBackend implements SqlBackend {
         return """
                 CREATE TABLE IF NOT EXISTS %s (
                     id             BIGINT       NOT NULL AUTO_INCREMENT,
-                    nickname       VARCHAR(16)  NOT NULL,
-                    nickname_lower VARCHAR(16)  NOT NULL,
+                    nickname       VARCHAR(32)  NOT NULL,
+                    nickname_lower VARCHAR(32)  NOT NULL,
                     uuid           CHAR(36)     NULL,
                     ip             VARCHAR(45)  NULL,
                     action         VARCHAR(32)  NOT NULL,

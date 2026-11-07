@@ -65,9 +65,10 @@ public final class MikuConfig {
             validateAndWarn(logger);
         }
         // 别名在加载后解析一次并缓存（命令注册与命令拦截共用，必须保持一致）
-        this.loginAliases = getStringList("commands.login-aliases", List.of("l", "log"));
-        this.registerAliases = getStringList("commands.register-aliases", List.of("reg"));
-        this.changePasswordAliases = getStringList("commands.changepassword-aliases", List.of("cp", "changepw"));
+        this.loginAliases = normalizeAliases(getStringList("commands.login-aliases", List.of("l", "log")));
+        this.registerAliases = normalizeAliases(getStringList("commands.register-aliases", List.of("reg")));
+        this.changePasswordAliases =
+                normalizeAliases(getStringList("commands.changepassword-aliases", List.of("cp", "changepw")));
     }
 
     // ---------------------------------------------------------------------
@@ -668,13 +669,30 @@ public final class MikuConfig {
                 return false;
             }
         }
-        if (value != null && logger != null) {
+        if (value != null && logger != null && clampWarned.add("bool:" + path)) {
             // 以前对字符串一律 Boolean.parseBoolean：引号包裹的 "yes"、拼写错误会静默变成
-            // false（改了配置却不生效且无迹可循）；现在告警并回退默认值
+            // false（改了配置却不生效且无迹可循）；现在告警并回退默认值。
+            // 按项只提示一次：display.* 是每秒心跳都要读的键，否则每玩家每秒刷一条 WARN
             logger.warn("[MikuAuth] 配置项 '{}' 的值 '{}' 不是布尔值（true/false），已使用默认值 {}",
                     path, value, def);
         }
         return def;
+    }
+
+    /**
+     * 命令别名归一化：去空白、去前导斜杠、统一小写。
+     *
+     * <p>命令拦截用小写的命令标签比对，别名若配成 {@code "L"} 或 {@code "/l"}，
+     * 注册上去的命令与白名单比对就永远对不上 —— 未认证玩家会被自己的登录命令拦下。
+     */
+    private static List<String> normalizeAliases(List<String> raw) {
+        return raw.stream()
+                .map(String::trim)
+                .map(alias -> alias.startsWith("/") ? alias.substring(1) : alias)
+                .filter(alias -> !alias.isEmpty())
+                .map(alias -> alias.toLowerCase(Locale.ROOT))
+                .distinct()
+                .toList();
     }
 
     private List<String> getStringList(String path, List<String> def) {

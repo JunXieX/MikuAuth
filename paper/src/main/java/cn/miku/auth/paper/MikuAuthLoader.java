@@ -37,7 +37,8 @@ public final class MikuAuthLoader implements PluginLoader {
                 "aliyun", "default", "https://maven.aliyun.com/repository/public/").build());
         resolver.addRepository(new RemoteRepository.Builder(
                 "papermc", "default", "https://repo.papermc.io/repository/maven-public/").build());
-        // 与 gradle.properties 保持一致（构建脚本里由 Gradle 校验过，这里写死运行期坐标）
+        // 与 gradle.properties 的同名属性手工保持一致：这里是运行期坐标，构建脚本不会校验，
+        // 升级版本时必须两处同改（否则编译期与运行期会拿到两个不同版本）
         resolver.addDependency(new Dependency(new DefaultArtifact("at.favre.lib:bcrypt:0.10.2"), "runtime"));
         resolver.addDependency(new Dependency(new DefaultArtifact("at.favre.lib:bytes:1.5.0"), "runtime"));
         resolver.addDependency(new Dependency(new DefaultArtifact("com.zaxxer:HikariCP:5.1.0"), "runtime"));
