@@ -258,27 +258,9 @@ public final class DatabaseManager implements AuthRepository, AuditRepository, A
     public CompletableFuture<RegisterResult> register(UUID uuid, String nickname, String passwordHash,
                                                       String authType, String ip) {
         return supply(connection -> {
-            try (PreparedStatement ps = connection.prepareStatement("""
-                    INSERT INTO miku_players
-                        (uuid, nickname_lower, display_name, password_hash, auth_type,
-                         register_ip, register_time, last_login_ip, last_login_time)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""")) {
-                long now = System.currentTimeMillis();
-                ps.setString(1, UuidUtil.format(uuid));
-                ps.setString(2, MikuConfig.normalize(nickname));
-                ps.setString(3, nickname);
-                ps.setString(4, passwordHash);
-                ps.setString(5, authType);
-                ps.setString(6, ip);
-                ps.setLong(7, now);
-                ps.setString(8, ip);
-                ps.setLong(9, now);
-                ps.executeUpdate();
-                return RegisterResult.OK;
+            try {
+                return insertPlayer(connection, uuid, nickname, passwordHash, authType, ip);
             } catch (SQLException e) {
-                if (isUniqueViolation(e)) {
-                    return RegisterResult.DUPLICATE;
-                }
                 logger.error("[数据库] 注册 {} 失败: {}", nickname, e.getMessage());
                 return RegisterResult.ERROR;
             }

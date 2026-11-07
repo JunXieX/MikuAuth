@@ -347,7 +347,9 @@ public final class PreJoinGate implements Listener {
             }
             return;
         }
-        if (session.tries >= plugin.config().maxLoginTries()) {
+        // max-tries: 0 = 不限（与代理端同一口径）；不排除 0 的话，第一次输错就会命中"超过次数"
+        int maxTries = plugin.config().maxLoginTries();
+        if (maxTries > 0 && session.tries >= maxTries) {
             if (session.finish()) {
                 fail(session.connection, "kick.too-many-tries", Map.of());
                 session.done.complete(null);
